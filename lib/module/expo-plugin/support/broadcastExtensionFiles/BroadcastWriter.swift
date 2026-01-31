@@ -42,7 +42,6 @@ enum Error: Swift.Error {
 public final class BroadcastWriter {
 
   private var assetWriterSessionStarted: Bool = false
-  private var audioAssetWriterSessionStarted: Bool = false
   private let assetWriterQueue: DispatchQueue
   private let assetWriter: AVAssetWriter
 
@@ -181,15 +180,26 @@ public final class BroadcastWriter {
     return desc
   }()
 
-  // Separate mic audio writer
-  private var separateAudioWriter: AVAssetWriter?
+  // Separate mic audio - now using raw PCM for resilience
   private let separateAudioFile: Bool
-  private let audioOutputURL: URL?
+  private let audioOutputURL: URL?  // Final M4A output
+  private var micPcmURL: URL?  // Temporary raw PCM file
+  private var micPcmFileHandle: FileHandle?
+  private var micPcmBytesWritten: Int = 0
+  private var micPcmWriteErrors: Int = 0
 
-  // Separate app audio writer
-  private var appAudioWriter: AVAssetWriter?
-  private let appAudioOutputURL: URL?
-  private var appAudioAssetWriterSessionStarted: Bool = false
+  // Separate app audio - now using raw PCM for resilience
+  private let appAudioOutputURL: URL?  // Final M4A output
+  private var appAudioPcmURL: URL?  // Temporary raw PCM file
+  private var appAudioPcmFileHandle: FileHandle?
+  private var appAudioPcmBytesWritten: Int = 0
+  private var appAudioPcmWriteErrors: Int = 0
+
+  // Audio format captured from first sample (needed for PCM → M4A conversion)
+  private var capturedMicSampleRate: Double = 48000
+  private var capturedMicChannels: Int = 1
+  private var capturedAppAudioSampleRate: Double = 48000
+  private var capturedAppAudioChannels: Int = 1
 
   private lazy var videoInput: AVAssetWriterInput = { [unowned self] in
     let videoWidth = screenSize.width * screenScale
@@ -270,53 +280,8 @@ public final class BroadcastWriter {
     return input
   }()
 
-  // Separate audio file input (for microphone audio only)
-  private lazy var separateAudioInput: AVAssetWriterInput = {
-    // Calculate appropriate bitrate based on sample rate
-    // AAC encoder rejects high bitrates for low sample rates (e.g. 128kbps at 24kHz)
-    // Base: 64kbps for 44.1kHz mono, scaled proportionally
-    let scaleFactor = audioSampleRate / 44100.0
-    let bitRatePerChannel = 64000.0 * scaleFactor
-    let calculatedBitRate = Int(bitRatePerChannel)
-    let bitRate = max(min(calculatedBitRate, 128000), 24000)
-
-    var audioSettings: [String: Any] = [
-      AVFormatIDKey: kAudioFormatMPEG4AAC,
-      AVNumberOfChannelsKey: 1,
-      AVSampleRateKey: audioSampleRate,
-      AVEncoderBitRateKey: bitRate,
-    ]
-    let input: AVAssetWriterInput = .init(
-      mediaType: .audio,
-      outputSettings: audioSettings
-    )
-    input.expectsMediaDataInRealTime = true
-    return input
-  }()
-
-  // Separate app audio file input
-  private lazy var appAudioInput: AVAssetWriterInput = {
-    // Calculate appropriate bitrate based on sample rate
-    // AAC encoder rejects high bitrates for low sample rates (e.g. 128kbps at 24kHz)
-    // Base: 64kbps for 44.1kHz mono, scaled proportionally
-    let scaleFactor = audioSampleRate / 44100.0
-    let bitRatePerChannel = 64000.0 * scaleFactor
-    let calculatedBitRate = Int(bitRatePerChannel)
-    let bitRate = max(min(calculatedBitRate, 128000), 24000)
-
-    var audioSettings: [String: Any] = [
-      AVFormatIDKey: kAudioFormatMPEG4AAC,
-      AVNumberOfChannelsKey: 1,
-      AVSampleRateKey: audioSampleRate,
-      AVEncoderBitRateKey: bitRate,
-    ]
-    let input: AVAssetWriterInput = .init(
-      mediaType: .audio,
-      outputSettings: audioSettings
-    )
-    input.expectsMediaDataInRealTime = true
-    return input
-  }()
+  // Note: Separate audio inputs removed - now using raw PCM direct disk writes
+  // This makes audio recording crash-proof under memory pressure
 
   // Main video file inputs: video + mic audio only (no app audio)
   // App audio is written to a separate file for Mux compatibility
@@ -347,16 +312,20 @@ public final class BroadcastWriter {
     self.audioOutputURL = audioOutputURL
     self.appAudioOutputURL = appAudioOutputURL
 
-    // Initialize separate mic audio writer if needed
-    if separateAudioFile, let audioURL = audioOutputURL {
-      separateAudioWriter = try .init(url: audioURL, fileType: .m4a)
-      separateAudioWriter?.shouldOptimizeForNetworkUse = true
-    }
-
-    // Initialize separate app audio writer if needed
-    if separateAudioFile, let appAudioURL = appAudioOutputURL {
-      appAudioWriter = try .init(url: appAudioURL, fileType: .m4a)
-      appAudioWriter?.shouldOptimizeForNetworkUse = true
+    // Set up raw PCM file URLs for resilient audio recording
+    // PCM files are written directly to disk (no buffering), then converted to M4A at finalization
+    if separateAudioFile {
+      if audioOutputURL != nil {
+        // Create PCM file path alongside the M4A output
+        let uuid = UUID().uuidString
+        micPcmURL = FileManager.default.temporaryDirectory
+          .appendingPathComponent("\(uuid)_mic.pcm")
+      }
+      if appAudioOutputURL != nil {
+        let uuid = UUID().uuidString
+        appAudioPcmURL = FileManager.default.temporaryDirectory
+          .appendingPathComponent("\(uuid)_app.pcm")
+      }
     }
   }
 
@@ -381,34 +350,32 @@ public final class BroadcastWriter {
         throw $0
       }
 
-      // Start separate mic audio writer if enabled
-      if separateAudioFile, let audioWriter = separateAudioWriter {
-        let audioStatus = audioWriter.status
-        guard audioStatus == .unknown else {
-          throw Error.wrongAssetWriterStatus(audioStatus)
+      // Create raw PCM files for resilient audio recording
+      // These write directly to disk with no buffering - crash-proof!
+      if separateAudioFile {
+        if let pcmURL = micPcmURL {
+          // Remove existing file if any
+          try? FileManager.default.removeItem(at: pcmURL)
+          // Create new file
+          FileManager.default.createFile(atPath: pcmURL.path, contents: nil)
+          micPcmFileHandle = try? FileHandle(forWritingTo: pcmURL)
+          if micPcmFileHandle != nil {
+            debugPrint("✅ PCM mic audio file created: \(pcmURL.lastPathComponent)")
+          } else {
+            debugPrint("⚠️ Failed to create PCM mic audio file handle")
+          }
         }
-        try audioWriter.error.map { throw $0 }
-        if audioWriter.canAdd(separateAudioInput) {
-          audioWriter.add(separateAudioInput)
-        }
-        try audioWriter.error.map { throw $0 }
-        audioWriter.startWriting()
-        try audioWriter.error.map { throw $0 }
-      }
 
-      // Start separate app audio writer if enabled
-      if separateAudioFile, let appWriter = appAudioWriter {
-        let appAudioStatus = appWriter.status
-        guard appAudioStatus == .unknown else {
-          throw Error.wrongAssetWriterStatus(appAudioStatus)
+        if let pcmURL = appAudioPcmURL {
+          try? FileManager.default.removeItem(at: pcmURL)
+          FileManager.default.createFile(atPath: pcmURL.path, contents: nil)
+          appAudioPcmFileHandle = try? FileHandle(forWritingTo: pcmURL)
+          if appAudioPcmFileHandle != nil {
+            debugPrint("✅ PCM app audio file created: \(pcmURL.lastPathComponent)")
+          } else {
+            debugPrint("⚠️ Failed to create PCM app audio file handle")
+          }
         }
-        try appWriter.error.map { throw $0 }
-        if appWriter.canAdd(appAudioInput) {
-          appWriter.add(appAudioInput)
-        }
-        try appWriter.error.map { throw $0 }
-        appWriter.startWriting()
-        try appWriter.error.map { throw $0 }
       }
     }
   }
@@ -584,6 +551,12 @@ public final class BroadcastWriter {
       // Early buffer metrics
       info.append("earlyBuffersDropped=\(earlyBuffersDropped)")
 
+      // PCM direct-write metrics (crash-proof audio recording)
+      info.append("micPcmBytesWritten=\(micPcmBytesWritten)")
+      info.append("micPcmWriteErrors=\(micPcmWriteErrors)")
+      info.append("appAudioPcmBytesWritten=\(appAudioPcmBytesWritten)")
+      info.append("appAudioPcmWriteErrors=\(appAudioPcmWriteErrors)")
+
       // Check output file
       let outputPath = assetWriter.outputURL.path
       let fileExists = FileManager.default.fileExists(atPath: outputPath)
@@ -690,6 +663,16 @@ public final class BroadcastWriter {
       metrics["sessionStarted"] = assetWriterSessionStarted
       metrics["audioSessionChangeCount"] = audioSessionChangeCount
 
+      // PCM direct-write metrics (crash-proof audio recording)
+      metrics["micPcmBytesWritten"] = micPcmBytesWritten
+      metrics["micPcmWriteErrors"] = micPcmWriteErrors
+      metrics["appAudioPcmBytesWritten"] = appAudioPcmBytesWritten
+      metrics["appAudioPcmWriteErrors"] = appAudioPcmWriteErrors
+      metrics["capturedMicSampleRate"] = capturedMicSampleRate
+      metrics["capturedMicChannels"] = capturedMicChannels
+      metrics["capturedAppAudioSampleRate"] = capturedAppAudioSampleRate
+      metrics["capturedAppAudioChannels"] = capturedAppAudioChannels
+
       #if os(iOS)
         let audioSession = AVAudioSession.sharedInstance()
         let route = audioSession.currentRoute
@@ -738,18 +721,12 @@ public final class BroadcastWriter {
       guard assetWriterSessionStarted else {
         debugPrint("⚠️ BroadcastWriter: No video frames received, canceling writer")
         assetWriter.cancelWriting()
-        // Also cancel audio writers
-        separateAudioWriter?.cancelWriting()
-        appAudioWriter?.cancelWriting()
+        // Close PCM file handles
+        closePcmFileHandles()
         throw Error.wrongAssetWriterStatus(.cancelled)
       }
 
       let group: DispatchGroup = .init()
-
-      // Pad audio files with silenne to match video length
-      if isPositiveTime(lastVideoEndTime) {
-        padAudioToVideoLength()
-      }
 
       inputs
         .lazy
@@ -788,69 +765,322 @@ public final class BroadcastWriter {
       group.wait()
       try error.map { throw $0 }
 
-      // Finish separate mic audio writer if enabled
+      // Close PCM file handles first
+      closePcmFileHandles()
+
+      // Convert PCM files to M4A
       var audioURL: URL? = nil
-      if separateAudioFile, let audioWriter = separateAudioWriter {
-        if separateAudioInput.isReadyForMoreMediaData {
-          separateAudioInput.markAsFinished()
-        }
-
-        if audioWriter.status == .writing {
-          let audioGroup = DispatchGroup()
-          audioGroup.enter()
-
-          var audioError: Swift.Error?
-          audioWriter.finishWriting {
-            defer { audioGroup.leave() }
-            if let e = audioWriter.error {
-              audioError = e
-              return
-            }
-            if audioWriter.status != .completed {
-              audioError = Error.wrongAssetWriterStatus(audioWriter.status)
-            }
-          }
-          audioGroup.wait()
-
-          if audioError == nil {
-            audioURL = audioWriter.outputURL
-          }
-        }
-      }
-
-      // Finish separate app audio writer if enabled
       var appAudioURL: URL? = nil
-      if separateAudioFile, let appWriter = appAudioWriter {
-        if appAudioInput.isReadyForMoreMediaData {
-          appAudioInput.markAsFinished()
+
+      if separateAudioFile {
+        // Convert mic PCM to M4A
+        if let pcmURL = micPcmURL, let outputURL = audioOutputURL, micPcmBytesWritten > 0 {
+          debugPrint(
+            "🔄 Converting mic PCM to M4A: \(micPcmBytesWritten) bytes, sampleRate=\(capturedMicSampleRate)"
+          )
+          if let convertedURL = convertPcmToM4A(
+            pcmURL: pcmURL,
+            outputURL: outputURL,
+            sampleRate: capturedMicSampleRate,
+            channels: capturedMicChannels
+          ) {
+            audioURL = convertedURL
+            debugPrint("✅ Mic PCM → M4A conversion complete")
+          } else {
+            debugPrint("⚠️ Mic PCM → M4A conversion failed, returning raw PCM")
+            // Fall back to returning PCM file if conversion fails
+            audioURL = pcmURL
+          }
+        } else if micPcmBytesWritten == 0 {
+          debugPrint("⚠️ No mic PCM bytes written, skipping conversion")
         }
 
-        if appWriter.status == .writing {
-          let appAudioGroup = DispatchGroup()
-          appAudioGroup.enter()
-
-          var appAudioError: Swift.Error?
-          appWriter.finishWriting {
-            defer { appAudioGroup.leave() }
-            if let e = appWriter.error {
-              appAudioError = e
-              return
-            }
-            if appWriter.status != .completed {
-              appAudioError = Error.wrongAssetWriterStatus(appWriter.status)
-            }
+        // Convert app audio PCM to M4A
+        if let pcmURL = appAudioPcmURL, let outputURL = appAudioOutputURL,
+          appAudioPcmBytesWritten > 0
+        {
+          debugPrint(
+            "🔄 Converting app audio PCM to M4A: \(appAudioPcmBytesWritten) bytes, sampleRate=\(capturedAppAudioSampleRate)"
+          )
+          if let convertedURL = convertPcmToM4A(
+            pcmURL: pcmURL,
+            outputURL: outputURL,
+            sampleRate: capturedAppAudioSampleRate,
+            channels: capturedAppAudioChannels
+          ) {
+            appAudioURL = convertedURL
+            debugPrint("✅ App audio PCM → M4A conversion complete")
+          } else {
+            debugPrint("⚠️ App audio PCM → M4A conversion failed, returning raw PCM")
+            appAudioURL = pcmURL
           }
-          appAudioGroup.wait()
-
-          if appAudioError == nil {
-            appAudioURL = appWriter.outputURL
-          }
+        } else if appAudioPcmBytesWritten == 0 {
+          debugPrint("⚠️ No app audio PCM bytes written, skipping conversion")
         }
       }
 
       return FinishResult(
         videoURL: assetWriter.outputURL, audioURL: audioURL, appAudioURL: appAudioURL)
     }
+  }
+
+  /// Closes PCM file handles to flush data to disk
+  private func closePcmFileHandles() {
+    if let handle = micPcmFileHandle {
+      do {
+        try handle.synchronize()
+        try handle.close()
+        debugPrint("✅ Mic PCM file closed: \(micPcmBytesWritten) bytes written")
+      } catch {
+        debugPrint("⚠️ Error closing mic PCM file: \(error.localizedDescription)")
+      }
+      micPcmFileHandle = nil
+    }
+
+    if let handle = appAudioPcmFileHandle {
+      do {
+        try handle.synchronize()
+        try handle.close()
+        debugPrint("✅ App audio PCM file closed: \(appAudioPcmBytesWritten) bytes written")
+      } catch {
+        debugPrint("⚠️ Error closing app audio PCM file: \(error.localizedDescription)")
+      }
+      appAudioPcmFileHandle = nil
+    }
+  }
+
+  /// Converts a raw PCM file to M4A (AAC) format
+  /// Returns the output URL on success, nil on failure
+  private func convertPcmToM4A(
+    pcmURL: URL,
+    outputURL: URL,
+    sampleRate: Double,
+    channels: Int
+  ) -> URL? {
+    // Remove existing output file
+    try? FileManager.default.removeItem(at: outputURL)
+
+    // Read PCM data
+    guard let pcmData = try? Data(contentsOf: pcmURL) else {
+      debugPrint("⚠️ Failed to read PCM file")
+      return nil
+    }
+
+    guard pcmData.count > 0 else {
+      debugPrint("⚠️ PCM file is empty")
+      return nil
+    }
+
+    // Create AVAssetWriter for M4A output
+    guard let writer = try? AVAssetWriter(url: outputURL, fileType: .m4a) else {
+      debugPrint("⚠️ Failed to create M4A asset writer")
+      return nil
+    }
+
+    // Calculate bitrate based on sample rate
+    let scaleFactor = sampleRate / 44100.0
+    let bitRate = max(min(Int(64000.0 * scaleFactor), 128000), 24000)
+
+    let audioSettings: [String: Any] = [
+      AVFormatIDKey: kAudioFormatMPEG4AAC,
+      AVNumberOfChannelsKey: channels,
+      AVSampleRateKey: sampleRate,
+      AVEncoderBitRateKey: bitRate,
+    ]
+
+    let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+    audioInput.expectsMediaDataInRealTime = false
+
+    guard writer.canAdd(audioInput) else {
+      debugPrint("⚠️ Cannot add audio input to M4A writer")
+      return nil
+    }
+    writer.add(audioInput)
+
+    // Start writing
+    writer.startWriting()
+    writer.startSession(atSourceTime: .zero)
+
+    // Calculate samples and write in chunks
+    let bytesPerSample = 2  // 16-bit audio
+    let bytesPerFrame = bytesPerSample * channels
+    let totalSamples = pcmData.count / bytesPerFrame
+    let samplesPerBuffer = 1024
+    var samplesWritten = 0
+
+    let semaphore = DispatchSemaphore(value: 0)
+    var conversionError: Swift.Error?
+
+    audioInput.requestMediaDataWhenReady(on: DispatchQueue(label: "pcm.converter")) {
+      while audioInput.isReadyForMoreMediaData && samplesWritten < totalSamples {
+        let remainingSamples = totalSamples - samplesWritten
+        let samplesToWrite = min(samplesPerBuffer, remainingSamples)
+        let byteOffset = samplesWritten * bytesPerFrame
+        let byteLength = samplesToWrite * bytesPerFrame
+
+        guard byteOffset + byteLength <= pcmData.count else {
+          break
+        }
+
+        // Create CMSampleBuffer from PCM data
+        let subdata = pcmData.subdata(in: byteOffset..<(byteOffset + byteLength))
+
+        if let sampleBuffer = self.createSampleBuffer(
+          from: subdata,
+          sampleRate: sampleRate,
+          channels: channels,
+          sampleOffset: samplesWritten,
+          sampleCount: samplesToWrite
+        ) {
+          if !audioInput.append(sampleBuffer) {
+            conversionError = writer.error
+            debugPrint("⚠️ Failed to append sample buffer: \(writer.error?.localizedDescription ?? "unknown")")
+            break
+          }
+          samplesWritten += samplesToWrite
+        } else {
+          debugPrint("⚠️ Failed to create sample buffer at offset \(samplesWritten)")
+          break
+        }
+      }
+
+      audioInput.markAsFinished()
+      writer.finishWriting {
+        semaphore.signal()
+      }
+    }
+
+    // Wait for conversion to complete (with timeout)
+    let timeout = DispatchTime.now() + .seconds(30)
+    if semaphore.wait(timeout: timeout) == .timedOut {
+      debugPrint("⚠️ PCM → M4A conversion timed out")
+      writer.cancelWriting()
+      return nil
+    }
+
+    if let error = conversionError ?? writer.error {
+      debugPrint("⚠️ PCM → M4A conversion error: \(error.localizedDescription)")
+      return nil
+    }
+
+    guard writer.status == .completed else {
+      debugPrint("⚠️ M4A writer did not complete: \(writer.status.description)")
+      return nil
+    }
+
+    // Clean up PCM file
+    try? FileManager.default.removeItem(at: pcmURL)
+
+    debugPrint(
+      "✅ PCM → M4A conversion complete: \(samplesWritten) samples, \(pcmData.count) bytes → M4A")
+    return outputURL
+  }
+
+  /// Creates a CMSampleBuffer from raw PCM data
+  private func createSampleBuffer(
+    from data: Data,
+    sampleRate: Double,
+    channels: Int,
+    sampleOffset: Int,
+    sampleCount: Int
+  ) -> CMSampleBuffer? {
+    let bytesPerSample = 2
+    let bytesPerFrame = bytesPerSample * channels
+
+    // Create audio format description
+    var asbd = AudioStreamBasicDescription(
+      mSampleRate: sampleRate,
+      mFormatID: kAudioFormatLinearPCM,
+      mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+      mBytesPerPacket: UInt32(bytesPerFrame),
+      mFramesPerPacket: 1,
+      mBytesPerFrame: UInt32(bytesPerFrame),
+      mChannelsPerFrame: UInt32(channels),
+      mBitsPerChannel: UInt32(bytesPerSample * 8),
+      mReserved: 0
+    )
+
+    var formatDescription: CMFormatDescription?
+    let formatStatus = CMAudioFormatDescriptionCreate(
+      allocator: kCFAllocatorDefault,
+      asbd: &asbd,
+      layoutSize: 0,
+      layout: nil,
+      magicCookieSize: 0,
+      magicCookie: nil,
+      extensions: nil,
+      formatDescriptionOut: &formatDescription
+    )
+
+    guard formatStatus == noErr, let format = formatDescription else {
+      return nil
+    }
+
+    // Create block buffer from data
+    var blockBuffer: CMBlockBuffer?
+    let blockStatus = data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> OSStatus in
+      guard bytes.baseAddress != nil else { return -1 }
+      return CMBlockBufferCreateWithMemoryBlock(
+        allocator: kCFAllocatorDefault,
+        memoryBlock: nil,
+        blockLength: data.count,
+        blockAllocator: kCFAllocatorDefault,
+        customBlockSource: nil,
+        offsetToData: 0,
+        dataLength: data.count,
+        flags: 0,
+        blockBufferOut: &blockBuffer
+      )
+    }
+
+    guard blockStatus == kCMBlockBufferNoErr, let block = blockBuffer else {
+      return nil
+    }
+
+    // Copy data into block buffer
+    let copyStatus = data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> OSStatus in
+      guard let baseAddress = bytes.baseAddress else { return -1 }
+      return CMBlockBufferReplaceDataBytes(
+        with: baseAddress,
+        blockBuffer: block,
+        offsetIntoDestination: 0,
+        dataLength: data.count
+      )
+    }
+
+    guard copyStatus == kCMBlockBufferNoErr else {
+      return nil
+    }
+
+    // Create sample buffer
+    var sampleBuffer: CMSampleBuffer?
+    let timeScale = CMTimeScale(sampleRate)
+    var timing = CMSampleTimingInfo(
+      duration: CMTime(value: 1, timescale: timeScale),
+      presentationTimeStamp: CMTime(value: CMTimeValue(sampleOffset), timescale: timeScale),
+      decodeTimeStamp: .invalid
+    )
+
+    let sampleStatus = CMSampleBufferCreate(
+      allocator: kCFAllocatorDefault,
+      dataBuffer: block,
+      dataReady: true,
+      makeDataReadyCallback: nil,
+      refcon: nil,
+      formatDescription: format,
+      sampleCount: sampleCount,
+      sampleTimingEntryCount: 1,
+      sampleTimingArray: &timing,
+      sampleSizeEntryCount: 0,
+      sampleSizeArray: nil,
+      sampleBufferOut: &sampleBuffer
+    )
+
+    guard sampleStatus == noErr else {
+      return nil
+    }
+
+    return sampleBuffer
   }
 }
 
@@ -989,35 +1219,7 @@ extension BroadcastWriter {
     flushEarlyAudioBuffers()
   }
 
-  fileprivate func startAudioSessionIfNeeded() {
-    guard !audioAssetWriterSessionStarted, let audioWriter = separateAudioWriter,
-      audioWriter.status == .writing
-    else {
-      return
-    }
-
-    // Always use the shared session start time for audio/video sync
-    guard let startTime = sessionStartTime else {
-      return
-    }
-    audioWriter.startSession(atSourceTime: startTime)
-    audioAssetWriterSessionStarted = true
-  }
-
-  fileprivate func startAppAudioSessionIfNeeded() {
-    guard !appAudioAssetWriterSessionStarted, let appWriter = appAudioWriter,
-      appWriter.status == .writing
-    else {
-      return
-    }
-
-    // Always use the shared session start time for audio/video sync
-    guard let startTime = sessionStartTime else {
-      return
-    }
-    appWriter.startSession(atSourceTime: startTime)
-    appAudioAssetWriterSessionStarted = true
-  }
+  // Note: Audio session management removed - now using raw PCM direct writes
 
   fileprivate func captureVideoOutput(_ sampleBuffer: CMSampleBuffer) -> Bool {
     if !videoInput.isReadyForMoreMediaData {
@@ -1128,85 +1330,86 @@ extension BroadcastWriter {
   }
 
   fileprivate func captureSeparateAudioOutput(_ sampleBuffer: CMSampleBuffer) -> Bool {
-    guard separateAudioFile, let audioWriter = separateAudioWriter else {
-      return false
-    }
-
-    // Check if audio writer is still writing
-    guard audioWriter.status == .writing else {
-      debugPrint("separateAudioWriter is not writing, status: \(audioWriter.status.description)")
+    guard separateAudioFile, let fileHandle = micPcmFileHandle else {
       return false
     }
 
     guard let startTime = sessionStartTime else {
-      debugPrint("⚠️ Mic audio before video session start; dropping.")
+      // Still buffer/drop early audio - we need video timestamp reference
       return false
     }
-
-    // Start session if needed
-    startAudioSessionIfNeeded()
 
     let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
     // Allow small tolerance (100ms) for audio slightly before session start
     let tolerance = CMTime(value: 1, timescale: 10)
     let adjustedStartTime = CMTimeSubtract(startTime, tolerance)
     if CMTimeCompare(pts, adjustedStartTime) < 0 {
-      debugPrint(
-        "⚠️ Separate mic audio timestamp \(pts.seconds)s precedes adjusted start \(adjustedStartTime.seconds)s; dropping."
-      )
       return false
     }
 
-    // Track format for padding
+    // Capture audio format info from first sample (needed for PCM → M4A conversion)
     if micAudioFormatDescription == nil {
       micAudioFormatDescription = CMSampleBufferGetFormatDescription(sampleBuffer)
-    }
-    let duration = audioSampleDuration(sampleBuffer, formatDescription: micAudioFormatDescription)
-    let endTime = isPositiveTime(duration) ? CMTimeAdd(pts, duration) : pts
-
-    if !separateAudioInput.isReadyForMoreMediaData {
-      separateAudioBackpressureHits += 1
-      // Brief wait for separate audio
-      if !waitForInputReady(separateAudioInput, timeout: audioBackpressureTimeout) {
-        separateAudioBackpressureDrops += 1
+      if let formatDesc = micAudioFormatDescription,
+        let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)?.pointee
+      {
+        capturedMicSampleRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 48000
+        capturedMicChannels = max(Int(asbd.mChannelsPerFrame), 1)
         debugPrint(
-          "⚠️ separateAudioInput backpressure drop (hits: \(separateAudioBackpressureHits), drops: \(separateAudioBackpressureDrops))"
+          "📊 Captured mic audio format: \(capturedMicSampleRate)Hz, \(capturedMicChannels) channels"
         )
-        return false
       }
     }
-    let appended = separateAudioInput.append(sampleBuffer)
-    if appended {
+
+    // Extract raw PCM bytes from sample buffer and write DIRECTLY to disk
+    // This is crash-proof - data goes to disk immediately, no buffering!
+    guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+      return false
+    }
+
+    var length: Int = 0
+    var dataPointer: UnsafeMutablePointer<Int8>?
+    let status = CMBlockBufferGetDataPointer(
+      blockBuffer, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length,
+      dataPointerOut: &dataPointer)
+
+    guard status == kCMBlockBufferNoErr, let pointer = dataPointer, length > 0 else {
+      return false
+    }
+
+    // Write raw PCM bytes directly to disk
+    let data = Data(bytes: pointer, count: length)
+    do {
+      try fileHandle.write(contentsOf: data)
+      micPcmBytesWritten += length
       totalSeparateAudioSamples += 1
+
+      // Track timing for duration calculation
+      let duration = audioSampleDuration(sampleBuffer, formatDescription: micAudioFormatDescription)
+      let endTime = isPositiveTime(duration) ? CMTimeAdd(pts, duration) : pts
       updatePtsRange(pts, min: &separateMicPtsMin, max: &separateMicPtsMax)
       if CMTimeCompare(endTime, lastMicEndTime) > 0 {
         lastMicEndTime = endTime
       }
+      return true
+    } catch {
+      micPcmWriteErrors += 1
+      if micPcmWriteErrors <= 5 {
+        debugPrint("⚠️ PCM mic write error (\(micPcmWriteErrors)): \(error.localizedDescription)")
+      }
+      return false
     }
-    return appended
   }
 
   fileprivate func captureAppAudioOutput(_ sampleBuffer: CMSampleBuffer) -> Bool {
-    guard separateAudioFile, let appWriter = appAudioWriter else {
-      return false
-    }
-
-    // Check if app audio writer is still writing
-    guard appWriter.status == .writing else {
-      debugPrint("appAudioWriter is not writing, status: \(appWriter.status.description)")
+    guard separateAudioFile, let fileHandle = appAudioPcmFileHandle else {
       return false
     }
 
     guard let startTime = sessionStartTime else {
       appAudioDroppedBeforeSession += 1
-      debugPrint(
-        "⚠️ App audio before video session start; dropping. (count: \(appAudioDroppedBeforeSession))"
-      )
       return false
     }
-
-    // Start session if needed
-    startAppAudioSessionIfNeeded()
 
     let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
@@ -1218,9 +1421,6 @@ extension BroadcastWriter {
     }
     if let prevPTS = lastAppAudioPTS, CMTimeCompare(pts, prevPTS) < 0 {
       appAudioMonotonicityViolations += 1
-      debugPrint(
-        "⚠️ App audio PTS monotonicity violation: \(pts.seconds)s < \(prevPTS.seconds)s (count: \(appAudioMonotonicityViolations))"
-      )
     }
     lastAppAudioPTS = pts
 
@@ -1229,245 +1429,64 @@ extension BroadcastWriter {
     let adjustedStartTime = CMTimeSubtract(startTime, tolerance)
     if CMTimeCompare(pts, adjustedStartTime) < 0 {
       appAudioDroppedPTSBelowStart += 1
-      debugPrint(
-        "⚠️ App audio timestamp \(pts.seconds)s precedes adjusted start \(adjustedStartTime.seconds)s; dropping. (count: \(appAudioDroppedPTSBelowStart))"
-      )
       return false
     }
 
-    // Track format for padding
+    // Capture audio format info from first sample (needed for PCM → M4A conversion)
     if appAudioFormatDescription == nil {
       appAudioFormatDescription = CMSampleBufferGetFormatDescription(sampleBuffer)
-    }
-    let duration = audioSampleDuration(sampleBuffer, formatDescription: appAudioFormatDescription)
-    let endTime = isPositiveTime(duration) ? CMTimeAdd(pts, duration) : pts
-
-    if !appAudioInput.isReadyForMoreMediaData {
-      appAudioBackpressureHits += 1
-      // Brief wait for app audio
-      if !waitForInputReady(appAudioInput, timeout: audioBackpressureTimeout) {
-        appAudioBackpressureDrops += 1
+      if let formatDesc = appAudioFormatDescription,
+        let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)?.pointee
+      {
+        capturedAppAudioSampleRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 48000
+        capturedAppAudioChannels = max(Int(asbd.mChannelsPerFrame), 1)
         debugPrint(
-          "⚠️ appAudioInput backpressure drop (hits: \(appAudioBackpressureHits), drops: \(appAudioBackpressureDrops))"
+          "📊 Captured app audio format: \(capturedAppAudioSampleRate)Hz, \(capturedAppAudioChannels) channels"
         )
-        return false
       }
     }
-    let appended = appAudioInput.append(sampleBuffer)
-    if appended {
+
+    // Extract raw PCM bytes from sample buffer and write DIRECTLY to disk
+    guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+      return false
+    }
+
+    var length: Int = 0
+    var dataPointer: UnsafeMutablePointer<Int8>?
+    let status = CMBlockBufferGetDataPointer(
+      blockBuffer, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length,
+      dataPointerOut: &dataPointer)
+
+    guard status == kCMBlockBufferNoErr, let pointer = dataPointer, length > 0 else {
+      return false
+    }
+
+    // Write raw PCM bytes directly to disk - crash-proof!
+    let data = Data(bytes: pointer, count: length)
+    do {
+      try fileHandle.write(contentsOf: data)
+      appAudioPcmBytesWritten += length
       totalAppAudioSamples += 1
+
+      // Track timing
+      let duration = audioSampleDuration(sampleBuffer, formatDescription: appAudioFormatDescription)
+      let endTime = isPositiveTime(duration) ? CMTimeAdd(pts, duration) : pts
       updatePtsRange(pts, min: &appAudioPtsMin, max: &appAudioPtsMax)
       if CMTimeCompare(endTime, lastAppAudioEndTime) > 0 {
         lastAppAudioEndTime = endTime
       }
-    }
-    return appended
-  }
-
-  // MARK: - Audio Padding
-
-  /// Pads audio files with silence to match video length
-  fileprivate func padAudioToVideoLength() {
-    let videoEndTime = lastVideoEndTime
-    guard isPositiveTime(videoEndTime), let sessionStartTime = sessionStartTime else {
-      debugPrint("📐 Padding skipped: missing video end time or session start time")
-      return
-    }
-    debugPrint("📐 Video end time: \(videoEndTime.seconds)s")
-
-    // Pad mic audio if it's shorter than video
-    if separateAudioFile, let audioWriter = separateAudioWriter, audioWriter.status == .writing {
-      if !audioAssetWriterSessionStarted {
-        audioWriter.startSession(atSourceTime: sessionStartTime)
-        audioAssetWriterSessionStarted = true
+      return true
+    } catch {
+      appAudioPcmWriteErrors += 1
+      if appAudioPcmWriteErrors <= 5 {
+        debugPrint(
+          "⚠️ PCM app audio write error (\(appAudioPcmWriteErrors)): \(error.localizedDescription)")
       }
-      let micStartTime = isPositiveTime(lastMicEndTime) ? lastMicEndTime : sessionStartTime
-      if CMTimeCompare(micStartTime, videoEndTime) < 0 {
-        let silenceDuration = CMTimeSubtract(videoEndTime, micStartTime)
-        debugPrint("📐 Padding mic audio with \(silenceDuration.seconds)s of silence")
-        appendSilence(
-          to: separateAudioInput,
-          from: micStartTime,
-          duration: silenceDuration,
-          formatDescription: micAudioFormatDescription ?? defaultAudioFormatDescription
-        )
-      } else {
-        debugPrint("📐 Mic audio already matches/exceeds video length; no padding needed")
-      }
-    } else {
-      debugPrint("📐 Mic audio padding skipped: no separate mic writer or not writing")
-    }
-
-    // Pad app audio if it's shorter than video
-    if separateAudioFile, let appWriter = appAudioWriter, appWriter.status == .writing {
-      if !appAudioAssetWriterSessionStarted {
-        appWriter.startSession(atSourceTime: sessionStartTime)
-        appAudioAssetWriterSessionStarted = true
-      }
-      let appStartTime =
-        isPositiveTime(lastAppAudioEndTime) ? lastAppAudioEndTime : sessionStartTime
-      if CMTimeCompare(appStartTime, videoEndTime) < 0 {
-        let silenceDuration = CMTimeSubtract(videoEndTime, appStartTime)
-        debugPrint("📐 Padding app audio with \(silenceDuration.seconds)s of silence")
-        appendSilence(
-          to: appAudioInput,
-          from: appStartTime,
-          duration: silenceDuration,
-          formatDescription: appAudioFormatDescription ?? defaultAudioFormatDescription
-        )
-      } else {
-        debugPrint("📐 App audio already matches/exceeds video length; no padding needed")
-      }
-    } else {
-      debugPrint("📐 App audio padding skipped: no app writer or not writing")
+      return false
     }
   }
 
-  /// Appends silent audio samples to an input
-  fileprivate func appendSilence(
-    to input: AVAssetWriterInput,
-    from startTime: CMTime,
-    duration: CMTime,
-    formatDescription: CMFormatDescription?
-  ) {
-    guard isPositiveTime(duration) else {
-      return
-    }
-    let formatDesc = formatDescription ?? defaultAudioFormatDescription
-    guard let formatDesc else {
-      debugPrint("⚠️ Cannot pad audio: no format description available")
-      return
-    }
-
-    // Get audio format details
-    guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)?.pointee else {
-      debugPrint("⚠️ Cannot pad audio: unable to get audio stream description")
-      return
-    }
-
-    let sampleRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : audioSampleRate
-    let channelCount = max(Int(asbd.mChannelsPerFrame), 1)
-    let bitsPerChannel = asbd.mBitsPerChannel > 0 ? Int(asbd.mBitsPerChannel) : 16
-    let bytesPerSample = max(bitsPerChannel / 8, 1)
-    let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
-    let bytesPerFrame: Int = {
-      if asbd.mBytesPerFrame > 0 {
-        return Int(asbd.mBytesPerFrame)
-      }
-      let channelsForFrame = isNonInterleaved ? 1 : channelCount
-      return bytesPerSample * channelsForFrame
-    }()
-
-    let timeScale = CMTimeScale(sampleRate.rounded())
-    guard timeScale > 0 else {
-      debugPrint("⚠️ Cannot pad audio: invalid sample rate \(sampleRate)")
-      return
-    }
-
-    // Calculate samples needed (generate in chunks to avoid huge allocations)
-    let samplesNeededTime = CMTimeConvertScale(
-      duration, timescale: timeScale, method: .roundHalfAwayFromZero)
-    var samplesRemaining = Int(samplesNeededTime.value)
-    guard samplesRemaining > 0 else {
-      return
-    }
-
-    let samplesPerChunk = 1024
-    var currentTime = startTime
-
-    while samplesRemaining > 0 {
-      guard waitForInputReady(input, timeout: 0.5) else {
-        debugPrint("⚠️ Input not ready while padding audio; remaining samples: \(samplesRemaining)")
-        break
-      }
-
-      let samplesToWrite = min(samplesRemaining, samplesPerChunk)
-      let bufferSize = samplesToWrite * bytesPerFrame
-      let bufferCount = isNonInterleaved ? channelCount : 1
-
-      // Allocate AudioBufferList
-      let audioBufferList = AudioBufferList.allocate(maximumBuffers: bufferCount)
-      audioBufferList.unsafeMutablePointer.pointee.mNumberBuffers = UInt32(bufferCount)
-
-      var bufferPointers: [UnsafeMutableRawPointer] = []
-      bufferPointers.reserveCapacity(bufferCount)
-
-      for i in 0..<bufferCount {
-        guard let silentData = calloc(bufferSize, 1) else {
-          break
-        }
-        bufferPointers.append(silentData)
-
-        audioBufferList[i].mNumberChannels = isNonInterleaved ? 1 : UInt32(channelCount)
-        audioBufferList[i].mDataByteSize = UInt32(bufferSize)
-        audioBufferList[i].mData = silentData
-      }
-      defer {
-        bufferPointers.forEach { free($0) }
-        audioBufferList.unsafeMutablePointer.deallocate()
-      }
-
-      if bufferPointers.count != bufferCount {
-        debugPrint("⚠️ Failed to allocate silent audio buffers")
-        break
-      }
-
-      // Create CMSampleBuffer
-      var sampleBuffer: CMSampleBuffer?
-      var timing = CMSampleTimingInfo(
-        duration: CMTime(value: 1, timescale: timeScale),
-        presentationTimeStamp: currentTime,
-        decodeTimeStamp: .invalid
-      )
-
-      let status = CMSampleBufferCreate(
-        allocator: kCFAllocatorDefault,
-        dataBuffer: nil,
-        dataReady: false,
-        makeDataReadyCallback: nil,
-        refcon: nil,
-        formatDescription: formatDesc,
-        sampleCount: samplesToWrite,
-        sampleTimingEntryCount: 1,
-        sampleTimingArray: &timing,
-        sampleSizeEntryCount: 0,
-        sampleSizeArray: nil,
-        sampleBufferOut: &sampleBuffer
-      )
-
-      guard status == noErr, let buffer = sampleBuffer else {
-        debugPrint("⚠️ Failed to create silent sample buffer: \(status)")
-        break
-      }
-
-      // Set audio buffer data
-      let setStatus = CMSampleBufferSetDataBufferFromAudioBufferList(
-        buffer,
-        blockBufferAllocator: kCFAllocatorDefault,
-        blockBufferMemoryAllocator: kCFAllocatorDefault,
-        flags: 0,
-        bufferList: audioBufferList.unsafePointer
-      )
-
-      guard setStatus == noErr else {
-        debugPrint("⚠️ Failed to set audio buffer data: \(setStatus)")
-        break
-      }
-
-      // Append to writer
-      if !input.append(buffer) {
-        debugPrint("⚠️ Failed to append silent audio buffer")
-        break
-      }
-
-      // Advance time
-      let chunkDuration = CMTime(value: CMTimeValue(samplesToWrite), timescale: timeScale)
-      currentTime = CMTimeAdd(currentTime, chunkDuration)
-      samplesRemaining -= samplesToWrite
-    }
-
-    debugPrint("📐 Finished padding audio, remaining samples: \(samplesRemaining)")
-  }
+  // Note: Audio padding removed - with raw PCM approach, audio has its true recorded duration
 
   // MARK: - Helpers
 
