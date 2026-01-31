@@ -204,8 +204,8 @@ namespace margelo::nitro::nitroscreenrecorder {
         std::rethrow_exception(__result.error());
       }
     }
-    inline std::shared_ptr<Promise<std::optional<ScreenRecordingFile>>> finalizeChunk(double settledTimeMs) override {
-      auto __result = _swiftPart.finalizeChunk(std::forward<decltype(settledTimeMs)>(settledTimeMs));
+    inline std::shared_ptr<Promise<std::optional<ScreenRecordingFile>>> finalizeChunk(double settledTimeMs, const std::optional<std::string>& chunkId) override {
+      auto __result = _swiftPart.finalizeChunk(std::forward<decltype(settledTimeMs)>(settledTimeMs), chunkId);
       if (__result.hasError()) [[unlikely]] {
         std::rethrow_exception(__result.error());
       }

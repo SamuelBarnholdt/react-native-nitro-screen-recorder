@@ -701,7 +701,7 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
    Returns the video file containing content from the last markChunkStart() (or recording start) until now.
    Uses event-driven waiting: listens for chunkSaved notification from extension.
    */
-  func finalizeChunk(settledTimeMs: Double) throws -> Promise<ScreenRecordingFile?> {
+  func finalizeChunk(settledTimeMs: Double, chunkId: String?) throws -> Promise<ScreenRecordingFile?> {
     return Promise.async {
       // Guard against concurrent calls
       guard !self.isFinalizingChunk else {
@@ -720,9 +720,9 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
         return nil
       }
 
-      // Capture the chunkId NOW from local storage (not UserDefaults)
-      // This prevents race condition if markChunkStart is called again before retrieve
-      let chunkIdToRetrieve = self.currentChunkId
+      // Use provided chunkId if given, otherwise fall back to local storage
+      // This allows explicit ID-based retrieval for reliable chunk pairing
+      let chunkIdToRetrieve = chunkId ?? self.currentChunkId
 
       // Setup listener for chunkSaved notification BEFORE sending finalizeChunk
       let center = CFNotificationCenterGetDarwinNotifyCenter()
@@ -1026,10 +1026,8 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
       } else {
         print("⚠️ retrieveGlobalRecording: Chunk not found with ID '\(targetId)'")
         print("   Available chunks: \(chunks.compactMap { $0["chunkId"] as? String })")
-        // Fallback to LIFO if ID not found
-        chunkIndex = chunks.count - 1
-        chunkEntry = chunks[chunkIndex]
-        print("📦 retrieveGlobalRecording: Falling back to LIFO (index \(chunkIndex))")
+        // Do not fall back to LIFO when an explicit ID was provided
+        return nil
       }
     } else {
       // LIFO fallback: get newest (last in array)

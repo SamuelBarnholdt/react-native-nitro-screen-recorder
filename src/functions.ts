@@ -324,23 +324,26 @@ export function flushChunk(chunkId?: string): void {
  *
  * @platform iOS, Android
  * @param options.settledTimeMs A "delay" time to wait before retrieving the file. Default = 500ms
+ * @param options.chunkId Optional chunk ID to retrieve. If provided, retrieves that specific chunk.
+ *   If undefined, uses the ID from the last markChunkStart call. Recommended for reliable retrieval.
  * @returns Promise resolving to the finalized chunk file
  * @example
  * ```typescript
- * markChunkStart();
+ * markChunkStart('question-1');
  * // ... user does something important ...
- * const chunk1 = await finalizeChunk();
+ * const chunk1 = await finalizeChunk({ chunkId: 'question-1' });
  * await uploadToServer(chunk1);
  *
  * // On Android, call markChunkStart() again to start next chunk
  * // On iOS, recording continues automatically
- * markChunkStart();
- * const chunk2 = await finalizeChunk();
+ * markChunkStart('question-2');
+ * const chunk2 = await finalizeChunk({ chunkId: 'question-2' });
  * await uploadToServer(chunk2);
  * ```
  */
 export async function finalizeChunk(options?: {
-  settledTimeMs: number;
+  settledTimeMs?: number;
+  chunkId?: string;
 }): Promise<ScreenRecordingFile | undefined> {
   let settledTimeMs = 500;
   if (options?.settledTimeMs) {
@@ -355,7 +358,10 @@ export async function finalizeChunk(options?: {
       settledTimeMs = options.settledTimeMs;
     }
   }
-  return NitroScreenRecorderHybridObject.finalizeChunk(settledTimeMs);
+  return NitroScreenRecorderHybridObject.finalizeChunk(
+    settledTimeMs,
+    options?.chunkId
+  );
 }
 
 /**

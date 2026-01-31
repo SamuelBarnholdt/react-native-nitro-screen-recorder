@@ -482,9 +482,9 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
     }
   }
 
-  override fun finalizeChunk(settledTimeMs: Double): Promise<ScreenRecordingFile?> {
+  override fun finalizeChunk(settledTimeMs: Double, chunkId: String?): Promise<ScreenRecordingFile?> {
     return Promise.async {
-      Log.d(TAG, "📦 finalizeChunk called with settledTimeMs=$settledTimeMs")
+      Log.d(TAG, "📦 finalizeChunk called with settledTimeMs=$settledTimeMs, chunkId=$chunkId")
       
       val service = globalRecordingService
       if (service == null) {

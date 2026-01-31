@@ -124,7 +124,7 @@ abstract class HybridNitroScreenRecorderSpec: HybridObject() {
   
   @DoNotStrip
   @Keep
-  abstract fun finalizeChunk(settledTimeMs: Double): Promise<ScreenRecordingFile?>
+  abstract fun finalizeChunk(settledTimeMs: Double, chunkId: String?): Promise<ScreenRecordingFile?>
   
   @DoNotStrip
   @Keep
