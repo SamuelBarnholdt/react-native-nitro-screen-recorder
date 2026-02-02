@@ -185,6 +185,9 @@ final class SampleHandler: RPBroadcastSampleHandler {
     fileManager.removeFileIfExists(url: audioNodeURL)
     fileManager.removeFileIfExists(url: appAudioNodeURL)
     super.init()
+
+    // DEBUG: Print to system console (doesn't depend on App Group)
+    print("🏁 [BroadcastExtension] SampleHandler init() - extension is being loaded!")
   }
 
   deinit {
@@ -259,6 +262,10 @@ final class SampleHandler: RPBroadcastSampleHandler {
 
   // MARK: – Broadcast lifecycle
   override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
+    // DEBUG: Print to system console FIRST (doesn't depend on App Group)
+    print("🚀 [BroadcastExtension] broadcastStarted called!")
+    print("🚀 [BroadcastExtension] hostAppGroupIdentifier = \(hostAppGroupIdentifier ?? "NIL")")
+
     startListeningForNotifications()
 
     // Mark broadcast as active
@@ -456,10 +463,36 @@ final class SampleHandler: RPBroadcastSampleHandler {
   private var lastVideoFrameTime: Date?
   private var totalVideoFrames: Int = 0
 
+  // Debug: track first buffer received for each type
+  private var receivedFirstVideo = false
+  private var receivedFirstMic = false
+  private var receivedFirstAppAudio = false
+
   override func processSampleBuffer(
     _ sampleBuffer: CMSampleBuffer,
     with sampleBufferType: RPSampleBufferType
   ) {
+    // DEBUG: Log first buffer of each type (doesn't depend on App Group)
+    switch sampleBufferType {
+    case .video:
+      if !receivedFirstVideo {
+        receivedFirstVideo = true
+        print("🎬 [BroadcastExtension] First VIDEO buffer received!")
+      }
+    case .audioMic:
+      if !receivedFirstMic {
+        receivedFirstMic = true
+        print("🎤 [BroadcastExtension] First MIC buffer received!")
+      }
+    case .audioApp:
+      if !receivedFirstAppAudio {
+        receivedFirstAppAudio = true
+        print("🔊 [BroadcastExtension] First APP AUDIO buffer received!")
+      }
+    @unknown default:
+      break
+    }
+
     // Use sync to ensure thread safety with writer swaps
     writerQueue.sync {
       guard let writer = self.writer else {

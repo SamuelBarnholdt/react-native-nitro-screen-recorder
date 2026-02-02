@@ -92,8 +92,17 @@ export default function App() {
       hasStoppedForMicFailureRef.current = false;
       setHadMicFailure(false);
     },
-    onRecordingFinished: () => {
+    onRecordingFinished: (file) => {
       console.log('🛑 Recording ended');
+      if (file) {
+        setGlobalRecording(file);
+        console.log('✅ Global recording saved:');
+        console.log(`   📹 Video: ${file.path}`);
+        console.log(`   📹 Name: ${file.name}`);
+        console.log(`   📹 Duration: ${file.duration?.toFixed(1)}s`);
+      } else {
+        console.log('⚠️ No file returned from recording');
+      }
       setIsChunkingActive(false);
       hasStoppedForMicFailureRef.current = false;
     },
