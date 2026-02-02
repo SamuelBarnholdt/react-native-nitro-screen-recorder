@@ -891,8 +891,8 @@ extension BroadcastWriter {
   fileprivate func flushEarlyAudioBuffers() {
     guard let startTime = sessionStartTime else { return }
 
-    // Small tolerance: allow audio up to 100ms before video start
-    let tolerance = CMTime(value: 1, timescale: 10)  // 100ms
+    // Small tolerance: allow audio up to 50ms before video start (tighter sync)
+    let tolerance = CMTime(value: 50, timescale: 1000)  // 50ms
     let adjustedStartTime = CMTimeSubtract(startTime, tolerance)
 
     // Flush mic audio buffers
@@ -956,34 +956,16 @@ extension BroadcastWriter {
 
     let sourceTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
-    // Check if we have early audio that should adjust our start time
-    // Use the earliest timestamp between video and buffered audio
-    var effectiveStartTime = sourceTime
-    if let earliestMic = earlyMicBuffers.first {
-      let micPTS = CMSampleBufferGetPresentationTimeStamp(earliestMic)
-      if CMTimeCompare(micPTS, effectiveStartTime) < 0 {
-        effectiveStartTime = micPTS
-        debugPrint("📦 Adjusted session start to earliest mic audio: \(effectiveStartTime.seconds)s")
-      }
-    }
-    if let earliestApp = earlyAppAudioBuffers.first {
-      let appPTS = CMSampleBufferGetPresentationTimeStamp(earliestApp)
-      if CMTimeCompare(appPTS, effectiveStartTime) < 0 {
-        effectiveStartTime = appPTS
-        debugPrint("📦 Adjusted session start to earliest app audio: \(effectiveStartTime.seconds)s")
-      }
-    }
-
-    // Store the reference timestamp for all writers to use
-    sessionStartTime = effectiveStartTime
-    assetWriter.startSession(atSourceTime: effectiveStartTime)
+    // VIDEO IS THE ANCHOR - never adjust for early audio
+    // Using audio timestamps as anchor causes gradual A/V desync
+    sessionStartTime = sourceTime
+    assetWriter.startSession(atSourceTime: sourceTime)
     assetWriterSessionStarted = true
     if firstVideoPTS == nil {
       firstVideoPTS = sourceTime
       debugPrint("📊 First video PTS: \(sourceTime.seconds)s")
     }
-    debugPrint(
-      "🎬 Session started at \(effectiveStartTime.seconds)s (video PTS: \(sourceTime.seconds)s)")
+    debugPrint("🎬 Session started at video PTS: \(sourceTime.seconds)s")
 
     // Flush buffered early audio now that session has started
     flushEarlyAudioBuffers()
@@ -1040,24 +1022,22 @@ extension BroadcastWriter {
     }
 
     var frameDuration = CMSampleBufferGetDuration(sampleBuffer)
-    if !isPositiveTime(frameDuration), let lastPTS = lastVideoPTS {
-      let delta = CMTimeSubtract(pts, lastPTS)
-      if isPositiveTime(delta) {
-        frameDuration = delta
-      }
-    }
+    // Trust buffer duration or use last known good duration
+    // Do NOT calculate from PTS delta (accumulates errors over time)
     if !isPositiveTime(frameDuration) {
       frameDuration =
         isPositiveTime(lastVideoFrameDuration)
         ? lastVideoFrameDuration
-        : CMTime(value: 1, timescale: 60)
+        : CMTime(value: 1, timescale: 30)  // Conservative 30fps default
     }
     let endTime = isPositiveTime(frameDuration) ? CMTimeAdd(pts, frameDuration) : pts
     let appended = videoInput.append(sampleBuffer)
     if appended {
       totalVideoFrames += 1
-      if isPositiveTime(frameDuration) {
-        lastVideoFrameDuration = frameDuration
+      // Only update from buffer-provided duration, not calculated
+      let bufferDuration = CMSampleBufferGetDuration(sampleBuffer)
+      if isPositiveTime(bufferDuration) {
+        lastVideoFrameDuration = bufferDuration
       }
       lastVideoPTS = pts
       if CMTimeCompare(endTime, lastVideoEndTime) > 0 {
@@ -1358,7 +1338,7 @@ extension BroadcastWriter {
       return bytesPerSample * channelsForFrame
     }()
 
-    let timeScale = CMTimeScale(sampleRate.rounded())
+    let timeScale = CMTimeScale(sampleRate)
     guard timeScale > 0 else {
       debugPrint("⚠️ Cannot pad audio: invalid sample rate \(sampleRate)")
       return
@@ -1512,7 +1492,7 @@ extension BroadcastWriter {
       let sampleRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : audioSampleRate
       if sampleRate > 0 {
         let sampleCount = CMSampleBufferGetNumSamples(sampleBuffer)
-        let timeScale = CMTimeScale(sampleRate.rounded())
+        let timeScale = CMTimeScale(sampleRate)
         if timeScale > 0 {
           return CMTime(value: CMTimeValue(sampleCount), timescale: timeScale)
         }
