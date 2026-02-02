@@ -149,6 +149,13 @@ final class SampleHandler: RPBroadcastSampleHandler {
   private var isCapturing = false
   private var chunkStartedAt: Double = 0
 
+  // MARK: - Audio Session Interruption Handling (Issue 1)
+  private var interruptionObserver: NSObjectProtocol?
+  private var routeChangeObserver: NSObjectProtocol?
+  private var isAudioInterrupted: Bool = false
+  private var interruptionCount: Int = 0
+  private var routeChangeCount: Int = 0
+
   // Serial queue for thread-safe writer operations
   private let writerQueue = DispatchQueue(label: "com.nitroscreenrecorder.writerQueue")
 
@@ -178,6 +185,9 @@ final class SampleHandler: RPBroadcastSampleHandler {
     fileManager.removeFileIfExists(url: audioNodeURL)
     fileManager.removeFileIfExists(url: appAudioNodeURL)
     super.init()
+
+    // DEBUG: Print to system console (doesn't depend on App Group)
+    print("🏁 [BroadcastExtension] SampleHandler init() - extension is being loaded!")
   }
 
   deinit {
@@ -189,6 +199,14 @@ final class SampleHandler: RPBroadcastSampleHandler {
       center, observer, SampleHandler.markChunkNotificationName, nil)
     CFNotificationCenterRemoveObserver(
       center, observer, SampleHandler.finalizeChunkNotificationName, nil)
+
+    // Clean up audio session observers (Issue 1)
+    if let observer = interruptionObserver {
+      NotificationCenter.default.removeObserver(observer)
+    }
+    if let observer = routeChangeObserver {
+      NotificationCenter.default.removeObserver(observer)
+    }
   }
 
   private func startListeningForNotifications() {
@@ -244,6 +262,10 @@ final class SampleHandler: RPBroadcastSampleHandler {
 
   // MARK: – Broadcast lifecycle
   override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
+    // DEBUG: Print to system console FIRST (doesn't depend on App Group)
+    print("🚀 [BroadcastExtension] broadcastStarted called!")
+    print("🚀 [BroadcastExtension] hostAppGroupIdentifier = \(hostAppGroupIdentifier ?? "NIL")")
+
     startListeningForNotifications()
 
     // Mark broadcast as active
@@ -266,6 +288,9 @@ final class SampleHandler: RPBroadcastSampleHandler {
       logWarning(
         "broadcastStarted: Failed to configure audio session: \(error.localizedDescription)")
     }
+
+    // Setup audio session interruption observers (Issue 1)
+    setupAudioSessionObservers()
 
     guard let groupID = hostAppGroupIdentifier else {
       logError("broadcastStarted: Missing app group identifier")
@@ -308,6 +333,102 @@ final class SampleHandler: RPBroadcastSampleHandler {
     }
   }
 
+  // MARK: - Audio Session Interruption Handling (Issue 1)
+
+  private func setupAudioSessionObservers() {
+    let nc = NotificationCenter.default
+
+    interruptionObserver = nc.addObserver(
+      forName: AVAudioSession.interruptionNotification,
+      object: AVAudioSession.sharedInstance(),
+      queue: nil
+    ) { [weak self] notification in
+      self?.handleAudioInterruption(notification)
+    }
+
+    routeChangeObserver = nc.addObserver(
+      forName: AVAudioSession.routeChangeNotification,
+      object: AVAudioSession.sharedInstance(),
+      queue: nil
+    ) { [weak self] notification in
+      self?.handleRouteChange(notification)
+    }
+
+    logInfo("setupAudioSessionObservers: Audio session observers registered")
+  }
+
+  private func handleAudioInterruption(_ notification: Notification) {
+    guard let userInfo = notification.userInfo,
+          let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+          let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
+
+    interruptionCount += 1
+
+    switch type {
+    case .began:
+      isAudioInterrupted = true
+      logWarning("Audio interruption BEGAN (#\(interruptionCount))")
+      writerQueue.sync { writer?.pause() }
+
+    case .ended:
+      isAudioInterrupted = false
+      logInfo("Audio interruption ENDED (#\(interruptionCount))")
+
+      let shouldResume = (userInfo[AVAudioSessionInterruptionOptionKey] as? UInt)
+        .map { AVAudioSession.InterruptionOptions(rawValue: $0).contains(.shouldResume) } ?? false
+
+      if shouldResume {
+        do {
+          try AVAudioSession.sharedInstance().setActive(true)
+          writerQueue.sync { writer?.resume() }
+          logInfo("Audio session reactivated and writer resumed")
+        } catch {
+          logError("Failed to reactivate audio session: \(error.localizedDescription)")
+        }
+      } else {
+        logInfo("Audio interruption ended but shouldResume=false, not resuming writer")
+      }
+
+    @unknown default:
+      logWarning("Unknown audio interruption type: \(typeValue)")
+    }
+  }
+
+  private func handleRouteChange(_ notification: Notification) {
+    guard let userInfo = notification.userInfo,
+          let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
+          let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else { return }
+
+    routeChangeCount += 1
+
+    let session = AVAudioSession.sharedInstance()
+    let currentRoute = session.currentRoute
+    let inputPorts = currentRoute.inputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
+    let outputPorts = currentRoute.outputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
+
+    var reasonString: String
+    switch reason {
+    case .newDeviceAvailable:
+      reasonString = "newDeviceAvailable"
+    case .oldDeviceUnavailable:
+      reasonString = "oldDeviceUnavailable"
+    case .categoryChange:
+      reasonString = "categoryChange"
+    case .override:
+      reasonString = "override"
+    case .wakeFromSleep:
+      reasonString = "wakeFromSleep"
+    case .noSuitableRouteForCategory:
+      reasonString = "noSuitableRouteForCategory"
+    case .routeConfigurationChange:
+      reasonString = "routeConfigurationChange"
+    @unknown default:
+      reasonString = "unknown(\(reasonValue))"
+    }
+
+    logInfo("Audio route changed (#\(routeChangeCount)): reason=\(reasonString), sampleRate=\(session.sampleRate), inputs=[\(inputPorts)], outputs=[\(outputPorts)]")
+  }
+
   private func cleanupOldRecordings(in groupID: String) {
     guard
       let docs = fileManager.containerURL(
@@ -342,10 +463,36 @@ final class SampleHandler: RPBroadcastSampleHandler {
   private var lastVideoFrameTime: Date?
   private var totalVideoFrames: Int = 0
 
+  // Debug: track first buffer received for each type
+  private var receivedFirstVideo = false
+  private var receivedFirstMic = false
+  private var receivedFirstAppAudio = false
+
   override func processSampleBuffer(
     _ sampleBuffer: CMSampleBuffer,
     with sampleBufferType: RPSampleBufferType
   ) {
+    // DEBUG: Log first buffer of each type (doesn't depend on App Group)
+    switch sampleBufferType {
+    case .video:
+      if !receivedFirstVideo {
+        receivedFirstVideo = true
+        print("🎬 [BroadcastExtension] First VIDEO buffer received!")
+      }
+    case .audioMic:
+      if !receivedFirstMic {
+        receivedFirstMic = true
+        print("🎤 [BroadcastExtension] First MIC buffer received!")
+      }
+    case .audioApp:
+      if !receivedFirstAppAudio {
+        receivedFirstAppAudio = true
+        print("🔊 [BroadcastExtension] First APP AUDIO buffer received!")
+      }
+    @unknown default:
+      break
+    }
+
     // Use sync to ensure thread safety with writer swaps
     writerQueue.sync {
       guard let writer = self.writer else {
@@ -387,6 +534,11 @@ final class SampleHandler: RPBroadcastSampleHandler {
         if self.frameCount >= self.statusUpdateInterval {
           self.frameCount = 0
           self.updateExtensionStatus()
+
+          // Issue 4: Periodic check for writer failure
+          if writer.hasFailed {
+            self.logError("Writer has FAILED: \(writer.failureError?.localizedDescription ?? "unknown")")
+          }
         }
       }
 
