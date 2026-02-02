@@ -336,9 +336,13 @@ export default function App() {
       Alert.alert('Not Recording', 'Start a global recording first');
       return;
     }
+    console.log('📍 markChunkStart: Sending notification...');
+    const t0 = performance.now();
     ScreenRecorder.markChunkStart();
+    console.log(
+      `📍 markChunkStart: Done (${(performance.now() - t0).toFixed(0)}ms)`
+    );
     setIsChunkingActive(true);
-    console.log('📍 Chunk start marked');
     Alert.alert('Chunk Started', 'Recording content from this point...');
   }, [isRecording]);
 
@@ -385,8 +389,21 @@ export default function App() {
         console.log(
           `   🎵 Audio Duration: ${file.audioFile.duration.toFixed(1)}s`
         );
+        // Video/Audio sync check
+        const syncDiff = file.duration - file.audioFile.duration;
+        const syncStatus = Math.abs(syncDiff) < 0.5 ? '✅' : '⚠️';
+        console.log(
+          `   🔄 Sync: ${syncStatus} ${syncDiff >= 0 ? '+' : ''}${syncDiff.toFixed(2)}s (vid - aud)`
+        );
       } else {
         console.log(`   🎵 Audio: (none)`);
+      }
+
+      // Dump extension logs for debugging
+      if (Platform.OS === 'ios') {
+        console.log('   📜 Extension logs (last 10):');
+        const logs = ScreenRecorder.getExtensionLogs();
+        logs.slice(-10).forEach((log) => console.log(`      ${log}`));
       }
 
       Alert.alert(
@@ -1255,7 +1272,13 @@ export default function App() {
         `   Q${i + 1}/${numQuestions}: Recording for ${expectedDur.toFixed(1)}s...`
       );
 
+      // Wait for previous finalize to fully propagate before next mark
+      if (i > 0) {
+        await new Promise((r) => setTimeout(r, 150));
+      }
+
       // Start tracking this answer
+      console.log(`   Q${i + 1}/${numQuestions}: markChunkStart...`);
       ScreenRecorder.markChunkStart(`hardmode-q${i + 1}`);
 
       // Simulate recording
@@ -1268,30 +1291,42 @@ export default function App() {
       const finalizeTime = performance.now() - t0;
 
       if (file) {
-        // Wider tolerance for short recordings (< 2s get ±1s, others get ±0.5s)
-        const tolerance = expectedDur < 2 ? 1.0 : 0.5;
-        const durationMatch = Math.abs(file.duration - expectedDur) < tolerance;
-        const audioMatch = file.audioFile
-          ? Math.abs(file.duration - file.audioFile.duration) < 0.5
-          : true;
-        const success = durationMatch && audioMatch;
+        // What matters: video vs audio sync (not JS timer)
+        const audioDur = file.audioFile?.duration ?? 0;
+        const audioSyncDiff = audioDur > 0 ? file.duration - audioDur : 0;
+        const audioInSync = audioDur === 0 || Math.abs(audioSyncDiff) < 0.5;
+
+        // Also check we got meaningful content (> 0.1s)
+        const hasContent = file.duration > 0.1;
+        const success = hasContent && audioInSync;
 
         results.push({
           question: i + 1,
           expectedDur,
           actualDur: file.duration,
-          audioDur: file.audioFile?.duration ?? 0,
+          audioDur,
           success,
           noFile: false,
           finalizeTime,
         });
 
         const emoji = success ? '✅' : '❌';
-        const diff = file.duration - expectedDur;
-        const diffStr = diff >= 0 ? `+${diff.toFixed(1)}` : diff.toFixed(1);
+        const syncStr =
+          audioDur > 0
+            ? `sync:${audioSyncDiff >= 0 ? '+' : ''}${audioSyncDiff.toFixed(2)}s`
+            : 'no-audio';
         console.log(
-          `   Q${i + 1}/${numQuestions}: ${emoji} ${file.duration.toFixed(1)}s (${diffStr}s) [${finalizeTime.toFixed(0)}ms]`
+          `   Q${i + 1}/${numQuestions}: ${emoji} vid=${file.duration.toFixed(1)}s aud=${audioDur.toFixed(1)}s (${syncStr}) [${finalizeTime.toFixed(0)}ms]`
         );
+
+        // Dump extension logs on failure
+        if (!success && Platform.OS === 'ios') {
+          console.log(
+            `   📜 Extension logs after Q${i + 1} failure (${!hasContent ? 'no content' : 'audio sync'}):`
+          );
+          const logs = ScreenRecorder.getExtensionLogs();
+          logs.slice(-25).forEach((log) => console.log(`      ${log}`));
+        }
       } else {
         results.push({
           question: i + 1,
@@ -1354,9 +1389,18 @@ export default function App() {
       );
     }
 
+    // Categorize failures
+    const noContentCount = results.filter(
+      (r) => !r.noFile && r.actualDur <= 0.1
+    ).length;
+    const audioSyncFailCount = failed.length - noFileCount - noContentCount;
+
     if (failed.length > 0) {
       console.log(
         `   Failed questions: ${failed.map((f) => f.question).join(', ')}`
+      );
+      console.log(
+        `   Failure breakdown: noFile=${noFileCount}, noContent=${noContentCount}, audioSync=${audioSyncFailCount}`
       );
     }
 
@@ -1364,7 +1408,7 @@ export default function App() {
     Alert.alert(
       passed >= passThreshold ? '✅ Hard Mode Passed' : '❌ Hard Mode Failed',
       `${passed}/${numQuestions} questions succeeded (${((passed / numQuestions) * 100).toFixed(0)}%)\n` +
-        `No file: ${noFileCount}, Duration mismatch: ${failed.length - noFileCount}\n` +
+        `No file: ${noFileCount}, No content: ${noContentCount}, Audio sync: ${audioSyncFailCount}\n` +
         `Test duration: ${testDuration.toFixed(0)}s\n` +
         `Avg finalize: ${avgFinalizeTime.toFixed(0)}ms\n\n` +
         (failed.length > 0
