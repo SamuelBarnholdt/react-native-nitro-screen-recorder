@@ -150,6 +150,44 @@ public final class BroadcastWriter {
   private var lastAppAudioPTS: CMTime?
   private var micMonotonicityViolations: Int = 0
   private var appAudioMonotonicityViolations: Int = 0
+
+  // Audio gap tracking (for detecting privacy interruptions)
+  private var lastMicBufferTime: Date?
+  private var lastAppAudioBufferTime: Date?
+  private var micGapCount: Int = 0
+  private var appAudioGapCount: Int = 0
+
+  // Channel count tracking for stereo→mono downmix
+  private var detectedAppAudioChannels: Int = 0
+  private var appAudioDownmixWarningLogged: Bool = false
+
+  // MARK: - Audio Interruption Handling (Issue 1)
+  private var isAudioPaused: Bool = false
+  private var audioInterruptionCount: Int = 0
+  private var audioResumeCount: Int = 0
+  private var totalInterruptionDuration: TimeInterval = 0
+  private var lastInterruptionTime: Date?
+
+  // MARK: - Sample Rate Tracking (Issue 2)
+  private var configuredSampleRate: Double = 0
+  private var sampleRateMismatchDetected: Bool = false
+  private var sampleRateMismatchCount: Int = 0
+  private var maxSampleRateDrift: Double = 0
+
+  // MARK: - Format Validation Tracking (Issue 3)
+  private var lastMicFormatDescription: CMFormatDescription?
+  private var lastAppAudioFormatDescription: CMFormatDescription?
+  private var micFormatChangeCount: Int = 0
+  private var appAudioFormatChangeCount: Int = 0
+
+  // MARK: - Writer Failure Detection (Issue 4)
+  private var writerFailureDetected: Bool = false
+  private var writerFailureTime: Date?
+  private var writerFailureError: Swift.Error?
+  private var samplesDroppedAfterFailure: Int = 0
+
+  // MARK: - CMTime Precision Tracking (Issue 5)
+  private var maxTimescaleMismatch: Int32 = 0
   private lazy var defaultAudioFormatDescription: CMFormatDescription? = {
     let fallbackSampleRate = audioSampleRate > 0 ? audioSampleRate : 48_000
     var asbd = AudioStreamBasicDescription(
@@ -257,10 +295,14 @@ public final class BroadcastWriter {
   }()
 
   private lazy var microphoneInput: AVAssetWriterInput = {
+    let rate = audioSampleRate
+    if configuredSampleRate == 0 { configuredSampleRate = rate }
+    debugPrint("📊 Configuring microphoneInput @ \(rate)Hz")
+
     var audioSettings: [String: Any] = [
       AVFormatIDKey: kAudioFormatMPEG4AAC,
       AVNumberOfChannelsKey: 1,
-      AVSampleRateKey: audioSampleRate,
+      AVSampleRateKey: rate,
     ]
     let input: AVAssetWriterInput = .init(
       mediaType: .audio,
@@ -429,16 +471,23 @@ public final class BroadcastWriter {
     }
 
     let isWriting = assetWriterQueue.sync {
-      assetWriter.status == .writing
+      let status = assetWriter.status
+      if status != .writing && !writerFailureDetected {
+        writerFailureDetected = true
+        writerFailureTime = Date()
+        writerFailureError = assetWriter.error
+        debugPrint("🔴 AVAssetWriter FAILED: \(status.description), error: \(assetWriter.error?.localizedDescription ?? "none")")
+      }
+      return status == .writing
     }
 
     guard isWriting else {
-      debugPrint(
-        "assetWriter.status",
-        assetWriter.status.description,
-        "assetWriter.error:",
-        assetWriter.error ?? "no error"
-      )
+      assetWriterQueue.sync {
+        samplesDroppedAfterFailure += 1
+        if samplesDroppedAfterFailure % 100 == 1 {
+          debugPrint("⚠️ Dropping sample #\(samplesDroppedAfterFailure) after writer failure")
+        }
+      }
       return false
     }
 
@@ -493,11 +542,42 @@ public final class BroadcastWriter {
   }
 
   public func pause() {
-    // TODO: Pause
+    assetWriterQueue.sync {
+      guard !isAudioPaused else { return }
+      isAudioPaused = true
+      audioInterruptionCount += 1
+      lastInterruptionTime = Date()
+      debugPrint("⏸️ Writer paused (interruption #\(audioInterruptionCount))")
+    }
   }
 
   public func resume() {
-    // TODO: Resume
+    assetWriterQueue.sync {
+      guard isAudioPaused else { return }
+      isAudioPaused = false
+      audioResumeCount += 1
+
+      if let startTime = lastInterruptionTime {
+        totalInterruptionDuration += Date().timeIntervalSince(startTime)
+      }
+      lastInterruptionTime = nil
+
+      // Reset timing offsets (audio PTS may have shifted)
+      micTimingOffsetResolved = false
+      appAudioTimingOffsetResolved = false
+
+      debugPrint("▶️ Writer resumed (resume #\(audioResumeCount), total interruption: \(String(format: "%.2f", totalInterruptionDuration))s)")
+    }
+  }
+
+  /// Returns true if the writer has failed
+  public var hasFailed: Bool {
+    assetWriterQueue.sync { writerFailureDetected }
+  }
+
+  /// Returns the failure error if the writer has failed
+  public var failureError: Swift.Error? {
+    assetWriterQueue.sync { writerFailureError }
   }
 
   /// Returns diagnostic info about the writer state for debugging
@@ -678,6 +758,13 @@ public final class BroadcastWriter {
       metrics["micMonotonicityViolations"] = micMonotonicityViolations
       metrics["appAudioMonotonicityViolations"] = appAudioMonotonicityViolations
 
+      // Audio gap tracking (privacy interruptions)
+      metrics["micGapCount"] = micGapCount
+      metrics["appAudioGapCount"] = appAudioGapCount
+
+      // Channel count detection
+      metrics["detectedAppAudioChannels"] = detectedAppAudioChannels
+
       metrics["micPtsMin"] = micPtsMin?.seconds ?? -1
       metrics["micPtsMax"] = micPtsMax?.seconds ?? -1
       metrics["separateMicPtsMin"] = separateMicPtsMin?.seconds ?? -1
@@ -689,6 +776,29 @@ public final class BroadcastWriter {
       metrics["writerStatus"] = assetWriter.status.description
       metrics["sessionStarted"] = assetWriterSessionStarted
       metrics["audioSessionChangeCount"] = audioSessionChangeCount
+
+      // Issue 1: Audio Interruption metrics
+      metrics["audioInterruptionCount"] = audioInterruptionCount
+      metrics["audioResumeCount"] = audioResumeCount
+      metrics["totalInterruptionDuration"] = totalInterruptionDuration
+      metrics["isAudioPaused"] = isAudioPaused
+
+      // Issue 2: Sample Rate mismatch metrics
+      metrics["configuredSampleRate"] = configuredSampleRate
+      metrics["sampleRateMismatchDetected"] = sampleRateMismatchDetected
+      metrics["sampleRateMismatchCount"] = sampleRateMismatchCount
+      metrics["maxSampleRateDrift"] = maxSampleRateDrift
+
+      // Issue 3: Format change metrics
+      metrics["micFormatChangeCount"] = micFormatChangeCount
+      metrics["appAudioFormatChangeCount"] = appAudioFormatChangeCount
+
+      // Issue 4: Writer failure metrics
+      metrics["writerFailureDetected"] = writerFailureDetected
+      metrics["samplesDroppedAfterFailure"] = samplesDroppedAfterFailure
+
+      // Issue 5: CMTime precision metrics
+      metrics["maxTimescaleMismatch"] = maxTimescaleMismatch
 
       #if os(iOS)
         let audioSession = AVAudioSession.sharedInstance()
@@ -1056,6 +1166,18 @@ extension BroadcastWriter {
   }
 
   fileprivate func captureMicrophoneOutput(_ sampleBuffer: CMSampleBuffer) -> Bool {
+    // Issue 1: Skip audio during pause
+    if isAudioPaused { return false }
+
+    // Issue 2: Validate sample rate
+    validateIncomingSampleRate(sampleBuffer, label: "mic")
+
+    // Issue 3: Validate and track format changes
+    if !validateAndTrackFormat(sampleBuffer, lastFormat: &lastMicFormatDescription,
+                               changeCount: &micFormatChangeCount, label: "Mic") {
+      return false
+    }
+
     if !microphoneInput.isReadyForMoreMediaData {
       micBackpressureHits += 1
       // Brief wait for audio - avoid blocking too long
@@ -1073,6 +1195,18 @@ extension BroadcastWriter {
         "⚠️ Mic audio before video session start; dropping. (count: \(micDroppedBeforeSession))")
       return false
     }
+
+    // Track audio buffer gaps (for detecting privacy interruptions)
+    let now = Date()
+    if let lastTime = lastMicBufferTime {
+      let gap = now.timeIntervalSince(lastTime)
+      if gap > 0.5 {  // 500ms gap threshold
+        micGapCount += 1
+        debugPrint("⚠️ Mic audio gap detected: \(Int(gap * 1000))ms (gap #\(micGapCount))")
+      }
+    }
+    lastMicBufferTime = now
+
     let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
     // Track first mic PTS and monotonicity
@@ -1167,6 +1301,9 @@ extension BroadcastWriter {
   }
 
   fileprivate func captureAppAudioOutput(_ sampleBuffer: CMSampleBuffer) -> Bool {
+    // Issue 1: Skip audio during pause
+    if isAudioPaused { return false }
+
     guard separateAudioFile, let appWriter = appAudioWriter else {
       return false
     }
@@ -1177,6 +1314,15 @@ extension BroadcastWriter {
       return false
     }
 
+    // Issue 2: Validate sample rate
+    validateIncomingSampleRate(sampleBuffer, label: "appAudio")
+
+    // Issue 3: Validate and track format changes
+    if !validateAndTrackFormat(sampleBuffer, lastFormat: &lastAppAudioFormatDescription,
+                               changeCount: &appAudioFormatChangeCount, label: "AppAudio") {
+      return false
+    }
+
     guard let startTime = sessionStartTime else {
       appAudioDroppedBeforeSession += 1
       debugPrint(
@@ -1184,6 +1330,17 @@ extension BroadcastWriter {
       )
       return false
     }
+
+    // Track audio buffer gaps (for detecting privacy interruptions)
+    let now = Date()
+    if let lastTime = lastAppAudioBufferTime {
+      let gap = now.timeIntervalSince(lastTime)
+      if gap > 0.5 {  // 500ms gap threshold
+        appAudioGapCount += 1
+        debugPrint("⚠️ App audio gap detected: \(Int(gap * 1000))ms (gap #\(appAudioGapCount))")
+      }
+    }
+    lastAppAudioBufferTime = now
 
     // Start session if needed
     startAppAudioSessionIfNeeded()
@@ -1233,7 +1390,10 @@ extension BroadcastWriter {
         return false
       }
     }
-    let appended = appAudioInput.append(sampleBuffer)
+
+    // Downmix stereo to mono if needed (app audio is often stereo, but input is configured for mono)
+    let bufferToAppend = downmixToMonoIfNeeded(sampleBuffer)
+    let appended = appAudioInput.append(bufferToAppend)
     if appended {
       totalAppAudioSamples += 1
       updatePtsRange(pts, min: &appAudioPtsMin, max: &appAudioPtsMax)
@@ -1353,7 +1513,18 @@ extension BroadcastWriter {
     }
 
     let samplesPerChunk = 1024
-    var currentTime = startTime
+    let totalSamplesNeeded = samplesRemaining
+
+    // Convert start time to the target timescale for absolute time calculation (Issue 5)
+    let startTimeInTargetScale = CMTimeConvertScale(startTime, timescale: timeScale, method: .roundHalfAwayFromZero)
+
+    // Track timescale mismatch for diagnostics
+    if startTime.timescale != timeScale {
+      let mismatch = abs(Int32(startTime.timescale) - timeScale)
+      if mismatch > maxTimescaleMismatch {
+        maxTimescaleMismatch = mismatch
+      }
+    }
 
     while samplesRemaining > 0 {
       guard waitForInputReady(input, timeout: 0.5) else {
@@ -1391,6 +1562,10 @@ extension BroadcastWriter {
         debugPrint("⚠️ Failed to allocate silent audio buffers")
         break
       }
+
+      // Issue 5: Use absolute time calculation to avoid cumulative rounding errors
+      let samplesWritten = totalSamplesNeeded - samplesRemaining
+      let currentTime = CMTime(value: startTimeInTargetScale.value + CMTimeValue(samplesWritten), timescale: timeScale)
 
       // Create CMSampleBuffer
       var sampleBuffer: CMSampleBuffer?
@@ -1440,9 +1615,6 @@ extension BroadcastWriter {
         break
       }
 
-      // Advance time
-      let chunkDuration = CMTime(value: CMTimeValue(samplesToWrite), timescale: timeScale)
-      currentTime = CMTimeAdd(currentTime, chunkDuration)
       samplesRemaining -= samplesToWrite
     }
 
@@ -1741,6 +1913,239 @@ extension BroadcastWriter {
       }
       Thread.sleep(forTimeInterval: inputReadyPollInterval)
     }
+    return true
+  }
+
+  /// Converts stereo audio to mono by averaging channels
+  /// Returns the original buffer if already mono or if conversion fails
+  fileprivate func downmixToMonoIfNeeded(_ sampleBuffer: CMSampleBuffer) -> CMSampleBuffer {
+    guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
+      let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)?.pointee
+    else {
+      return sampleBuffer
+    }
+
+    let channelCount = Int(asbd.mChannelsPerFrame)
+
+    // Track detected channels for diagnostics
+    if detectedAppAudioChannels == 0 {
+      detectedAppAudioChannels = channelCount
+      debugPrint("📊 App audio channel count: \(channelCount)")
+    }
+
+    // If mono, return as-is
+    guard channelCount > 1 else {
+      return sampleBuffer
+    }
+
+    // Log warning once
+    if !appAudioDownmixWarningLogged {
+      debugPrint("⚠️ App audio is \(channelCount)-channel, downmixing to mono")
+      appAudioDownmixWarningLogged = true
+    }
+
+    // Get audio buffer data
+    guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+      return sampleBuffer
+    }
+
+    var length: Int = 0
+    var dataPointer: UnsafeMutablePointer<Int8>?
+    let status = CMBlockBufferGetDataPointer(
+      blockBuffer, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length,
+      dataPointerOut: &dataPointer)
+
+    guard status == kCMBlockBufferNoErr, let data = dataPointer else {
+      return sampleBuffer
+    }
+
+    let sampleCount = CMSampleBufferGetNumSamples(sampleBuffer)
+    let bytesPerSample = Int(asbd.mBitsPerChannel) / 8
+
+    // Only handle 16-bit PCM (most common for app audio)
+    guard asbd.mBitsPerChannel == 16 else {
+      debugPrint("⚠️ Unsupported bit depth for downmix: \(asbd.mBitsPerChannel)")
+      return sampleBuffer
+    }
+
+    // Create mono buffer
+    let monoLength = sampleCount * bytesPerSample
+    guard let monoData = malloc(monoLength) else {
+      return sampleBuffer
+    }
+
+    // Downmix: average channels (assuming interleaved Int16)
+    let stereoPtr = data.withMemoryRebound(to: Int16.self, capacity: sampleCount * channelCount) {
+      $0
+    }
+    let monoPtr = monoData.bindMemory(to: Int16.self, capacity: sampleCount)
+
+    for i in 0..<sampleCount {
+      var sum: Int32 = 0
+      for ch in 0..<channelCount {
+        sum += Int32(stereoPtr[i * channelCount + ch])
+      }
+      monoPtr[i] = Int16(clamping: sum / Int32(channelCount))
+    }
+
+    // Create mono format description
+    var monoAsbd = AudioStreamBasicDescription(
+      mSampleRate: asbd.mSampleRate,
+      mFormatID: kAudioFormatLinearPCM,
+      mFormatFlags: asbd.mFormatFlags,
+      mBytesPerPacket: UInt32(bytesPerSample),
+      mFramesPerPacket: 1,
+      mBytesPerFrame: UInt32(bytesPerSample),
+      mChannelsPerFrame: 1,
+      mBitsPerChannel: asbd.mBitsPerChannel,
+      mReserved: 0
+    )
+
+    var monoFormatDesc: CMFormatDescription?
+    let formatStatus = CMAudioFormatDescriptionCreate(
+      allocator: kCFAllocatorDefault,
+      asbd: &monoAsbd,
+      layoutSize: 0,
+      layout: nil,
+      magicCookieSize: 0,
+      magicCookie: nil,
+      extensions: nil,
+      formatDescriptionOut: &monoFormatDesc
+    )
+
+    guard formatStatus == noErr, let monoFormat = monoFormatDesc else {
+      free(monoData)
+      return sampleBuffer
+    }
+
+    // Create block buffer from mono data
+    var monoBlockBuffer: CMBlockBuffer?
+    let blockStatus = CMBlockBufferCreateWithMemoryBlock(
+      allocator: kCFAllocatorDefault,
+      memoryBlock: monoData,
+      blockLength: monoLength,
+      blockAllocator: kCFAllocatorDefault,
+      customBlockSource: nil,
+      offsetToData: 0,
+      dataLength: monoLength,
+      flags: 0,
+      blockBufferOut: &monoBlockBuffer
+    )
+
+    guard blockStatus == kCMBlockBufferNoErr, let monoBlock = monoBlockBuffer else {
+      free(monoData)
+      return sampleBuffer
+    }
+
+    // Create new sample buffer with mono data
+    let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+    let duration = CMSampleBufferGetDuration(sampleBuffer)
+    var timing = CMSampleTimingInfo(
+      duration: duration,
+      presentationTimeStamp: pts,
+      decodeTimeStamp: .invalid
+    )
+
+    var monoSampleBuffer: CMSampleBuffer?
+    let sampleStatus = CMSampleBufferCreate(
+      allocator: kCFAllocatorDefault,
+      dataBuffer: monoBlock,
+      dataReady: true,
+      makeDataReadyCallback: nil,
+      refcon: nil,
+      formatDescription: monoFormat,
+      sampleCount: sampleCount,
+      sampleTimingEntryCount: 1,
+      sampleTimingArray: &timing,
+      sampleSizeEntryCount: 0,
+      sampleSizeArray: nil,
+      sampleBufferOut: &monoSampleBuffer
+    )
+
+    guard sampleStatus == noErr, let monoBuffer = monoSampleBuffer else {
+      return sampleBuffer
+    }
+
+    return monoBuffer
+  }
+
+  /// Validates audio format before appending and logs mismatches
+  fileprivate func validateAudioFormat(
+    _ sampleBuffer: CMSampleBuffer, expectedChannels: Int, label: String
+  ) -> Bool {
+    guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
+      let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)?.pointee
+    else {
+      debugPrint("⚠️ \(label): Could not get format description")
+      return false
+    }
+
+    let channels = Int(asbd.mChannelsPerFrame)
+    if channels != expectedChannels {
+      debugPrint("⚠️ \(label): Channel mismatch - expected \(expectedChannels), got \(channels)")
+      return false
+    }
+    return true
+  }
+
+  // MARK: - Issue 2: Sample Rate Validation
+
+  /// Validates incoming sample rate against configured rate and logs mismatches
+  fileprivate func validateIncomingSampleRate(_ sampleBuffer: CMSampleBuffer, label: String) {
+    guard configuredSampleRate > 0 else { return }
+    guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
+          let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)?.pointee else { return }
+
+    let drift = abs(asbd.mSampleRate - configuredSampleRate)
+    if drift > 1 {
+      if !sampleRateMismatchDetected {
+        debugPrint("⚠️ \(label): Sample rate mismatch - configured=\(configuredSampleRate), incoming=\(asbd.mSampleRate)")
+      }
+      sampleRateMismatchDetected = true
+      sampleRateMismatchCount += 1
+      if drift > maxSampleRateDrift { maxSampleRateDrift = drift }
+    }
+  }
+
+  // MARK: - Issue 3: Format Change Tracking
+
+  /// Validates and tracks format changes, logging when format differs from previous
+  fileprivate func validateAndTrackFormat(
+    _ sampleBuffer: CMSampleBuffer,
+    lastFormat: inout CMFormatDescription?,
+    changeCount: inout Int,
+    label: String
+  ) -> Bool {
+    guard let currentFormat = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+      debugPrint("⚠️ \(label): No format description in sample buffer")
+      return false
+    }
+
+    if let previous = lastFormat, !CMFormatDescriptionEqual(previous, otherFormatDescription: currentFormat) {
+      changeCount += 1
+
+      // Log detailed format diff
+      var details: [String] = []
+      if let prevAsbd = CMAudioFormatDescriptionGetStreamBasicDescription(previous)?.pointee,
+         let currAsbd = CMAudioFormatDescriptionGetStreamBasicDescription(currentFormat)?.pointee {
+        if prevAsbd.mSampleRate != currAsbd.mSampleRate {
+          details.append("sampleRate: \(prevAsbd.mSampleRate)→\(currAsbd.mSampleRate)")
+        }
+        if prevAsbd.mChannelsPerFrame != currAsbd.mChannelsPerFrame {
+          details.append("channels: \(prevAsbd.mChannelsPerFrame)→\(currAsbd.mChannelsPerFrame)")
+        }
+        if prevAsbd.mBitsPerChannel != currAsbd.mBitsPerChannel {
+          details.append("bits: \(prevAsbd.mBitsPerChannel)→\(currAsbd.mBitsPerChannel)")
+        }
+        if prevAsbd.mFormatID != currAsbd.mFormatID {
+          details.append("formatID changed")
+        }
+      }
+
+      debugPrint("⚠️ \(label) FORMAT CHANGED (#\(changeCount)): \(details.joined(separator: ", "))")
+    }
+
+    lastFormat = currentFormat
     return true
   }
 }
