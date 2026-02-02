@@ -149,7 +149,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
   private var isCapturing = false
   private var chunkStartedAt: Double = 0
 
-  // MARK: - Audio Session Interruption Handling (Issue 1)
+  // MARK: - Audio Session Interruption Handling
   private var interruptionObserver: NSObjectProtocol?
   private var routeChangeObserver: NSObjectProtocol?
   private var isAudioInterrupted: Bool = false
@@ -197,7 +197,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
     CFNotificationCenterRemoveObserver(
       center, observer, SampleHandler.finalizeChunkNotificationName, nil)
 
-    // Clean up audio session observers (Issue 1)
+    // Clean up audio session observers
     if let observer = interruptionObserver {
       NotificationCenter.default.removeObserver(observer)
     }
@@ -282,7 +282,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
         "broadcastStarted: Failed to configure audio session: \(error.localizedDescription)")
     }
 
-    // Setup audio session interruption observers (Issue 1)
+    // Setup audio session interruption observers
     setupAudioSessionObservers()
 
     guard let groupID = hostAppGroupIdentifier else {
@@ -326,7 +326,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
     }
   }
 
-  // MARK: - Audio Session Interruption Handling (Issue 1)
+  // MARK: - Audio Session Interruption Handling
 
   private func setupAudioSessionObservers() {
     let nc = NotificationCenter.default
@@ -502,7 +502,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
           self.frameCount = 0
           self.updateExtensionStatus()
 
-          // Issue 4: Periodic check for writer failure
+          // Periodic check for writer failure
           if writer.hasFailed {
             self.logError("Writer has FAILED: \(writer.failureError?.localizedDescription ?? "unknown")")
           }
