@@ -77,6 +77,7 @@ namespace margelo::nitro::nitroscreenrecorder {
     void clearExtensionLogs() override;
     std::string getExtensionAudioMetrics() override;
     void clearExtensionAudioMetrics() override;
+    std::vector<std::string> getAudioDiagnostics() override;
     void clearRecordingCache() override;
 
   private:

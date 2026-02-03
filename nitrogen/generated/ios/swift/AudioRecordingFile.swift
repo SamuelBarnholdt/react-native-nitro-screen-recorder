@@ -18,8 +18,14 @@ public extension AudioRecordingFile {
   /**
    * Create a new instance of `AudioRecordingFile`.
    */
-  init(path: String, name: String, size: Double, duration: Double) {
-    self.init(std.string(path), std.string(name), size, duration)
+  init(path: String, name: String, size: Double, duration: Double, pcmFormat: PCMFormatInfo?) {
+    self.init(std.string(path), std.string(name), size, duration, { () -> bridge.std__optional_PCMFormatInfo_ in
+      if let __unwrappedValue = pcmFormat {
+        return bridge.create_std__optional_PCMFormatInfo_(__unwrappedValue)
+      } else {
+        return .init()
+      }
+    }())
   }
 
   var path: String {
@@ -63,6 +69,23 @@ public extension AudioRecordingFile {
     @inline(__always)
     set {
       self.__duration = newValue
+    }
+  }
+  
+  var pcmFormat: PCMFormatInfo? {
+    @inline(__always)
+    get {
+      return self.__pcmFormat.value
+    }
+    @inline(__always)
+    set {
+      self.__pcmFormat = { () -> bridge.std__optional_PCMFormatInfo_ in
+        if let __unwrappedValue = newValue {
+          return bridge.create_std__optional_PCMFormatInfo_(__unwrappedValue)
+        } else {
+          return .init()
+        }
+      }()
     }
   }
 }

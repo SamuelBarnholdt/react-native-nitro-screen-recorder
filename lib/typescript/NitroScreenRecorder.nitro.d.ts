@@ -53,6 +53,13 @@ export interface NitroScreenRecorder extends HybridObject<{
      * @platform iOS-only
      */
     clearExtensionAudioMetrics(): void;
+    /**
+     * Returns detailed audio diagnostics from the broadcast extension.
+     * Includes per-sample logging, append failures, format changes, and more.
+     * Use this to debug audio-specific issues like empty audio files.
+     * @platform iOS-only
+     */
+    getAudioDiagnostics(): string[];
     clearRecordingCache(): void;
 }
 //# sourceMappingURL=NitroScreenRecorder.nitro.d.ts.map

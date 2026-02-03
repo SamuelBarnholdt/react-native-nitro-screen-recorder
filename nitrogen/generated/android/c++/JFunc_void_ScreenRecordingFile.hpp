@@ -17,6 +17,8 @@
 #include "AudioRecordingFile.hpp"
 #include <optional>
 #include "JAudioRecordingFile.hpp"
+#include "PCMFormatInfo.hpp"
+#include "JPCMFormatInfo.hpp"
 
 namespace margelo::nitro::nitroscreenrecorder {
 

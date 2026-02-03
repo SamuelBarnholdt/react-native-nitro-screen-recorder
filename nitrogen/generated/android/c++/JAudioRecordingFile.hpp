@@ -10,6 +10,9 @@
 #include <fbjni/fbjni.h>
 #include "AudioRecordingFile.hpp"
 
+#include "JPCMFormatInfo.hpp"
+#include "PCMFormatInfo.hpp"
+#include <optional>
 #include <string>
 
 namespace margelo::nitro::nitroscreenrecorder {
@@ -39,11 +42,14 @@ namespace margelo::nitro::nitroscreenrecorder {
       double size = this->getFieldValue(fieldSize);
       static const auto fieldDuration = clazz->getField<double>("duration");
       double duration = this->getFieldValue(fieldDuration);
+      static const auto fieldPcmFormat = clazz->getField<JPCMFormatInfo>("pcmFormat");
+      jni::local_ref<JPCMFormatInfo> pcmFormat = this->getFieldValue(fieldPcmFormat);
       return AudioRecordingFile(
         path->toStdString(),
         name->toStdString(),
         size,
-        duration
+        duration,
+        pcmFormat != nullptr ? std::make_optional(pcmFormat->toCpp()) : std::nullopt
       );
     }
 
@@ -53,7 +59,7 @@ namespace margelo::nitro::nitroscreenrecorder {
      */
     [[maybe_unused]]
     static jni::local_ref<JAudioRecordingFile::javaobject> fromCpp(const AudioRecordingFile& value) {
-      using JSignature = JAudioRecordingFile(jni::alias_ref<jni::JString>, jni::alias_ref<jni::JString>, double, double);
+      using JSignature = JAudioRecordingFile(jni::alias_ref<jni::JString>, jni::alias_ref<jni::JString>, double, double, jni::alias_ref<JPCMFormatInfo>);
       static const auto clazz = javaClassStatic();
       static const auto create = clazz->getStaticMethod<JSignature>("fromCpp");
       return create(
@@ -61,7 +67,8 @@ namespace margelo::nitro::nitroscreenrecorder {
         jni::make_jstring(value.path),
         jni::make_jstring(value.name),
         value.size,
-        value.duration
+        value.duration,
+        value.pcmFormat.has_value() ? JPCMFormatInfo::fromCpp(value.pcmFormat.value()) : nullptr
       );
     }
   };

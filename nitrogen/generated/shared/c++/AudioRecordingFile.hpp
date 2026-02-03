@@ -23,9 +23,12 @@
 #error NitroModules cannot be found! Are you sure you installed NitroModules properly?
 #endif
 
-
+// Forward declaration of `PCMFormatInfo` to properly resolve imports.
+namespace margelo::nitro::nitroscreenrecorder { struct PCMFormatInfo; }
 
 #include <string>
+#include "PCMFormatInfo.hpp"
+#include <optional>
 
 namespace margelo::nitro::nitroscreenrecorder {
 
@@ -38,10 +41,11 @@ namespace margelo::nitro::nitroscreenrecorder {
     std::string name     SWIFT_PRIVATE;
     double size     SWIFT_PRIVATE;
     double duration     SWIFT_PRIVATE;
+    std::optional<PCMFormatInfo> pcmFormat     SWIFT_PRIVATE;
 
   public:
     AudioRecordingFile() = default;
-    explicit AudioRecordingFile(std::string path, std::string name, double size, double duration): path(path), name(name), size(size), duration(duration) {}
+    explicit AudioRecordingFile(std::string path, std::string name, double size, double duration, std::optional<PCMFormatInfo> pcmFormat): path(path), name(name), size(size), duration(duration), pcmFormat(pcmFormat) {}
   };
 
 } // namespace margelo::nitro::nitroscreenrecorder
@@ -57,7 +61,8 @@ namespace margelo::nitro {
         JSIConverter<std::string>::fromJSI(runtime, obj.getProperty(runtime, "path")),
         JSIConverter<std::string>::fromJSI(runtime, obj.getProperty(runtime, "name")),
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, "size")),
-        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, "duration"))
+        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, "duration")),
+        JSIConverter<std::optional<margelo::nitro::nitroscreenrecorder::PCMFormatInfo>>::fromJSI(runtime, obj.getProperty(runtime, "pcmFormat"))
       );
     }
     static inline jsi::Value toJSI(jsi::Runtime& runtime, const margelo::nitro::nitroscreenrecorder::AudioRecordingFile& arg) {
@@ -66,6 +71,7 @@ namespace margelo::nitro {
       obj.setProperty(runtime, "name", JSIConverter<std::string>::toJSI(runtime, arg.name));
       obj.setProperty(runtime, "size", JSIConverter<double>::toJSI(runtime, arg.size));
       obj.setProperty(runtime, "duration", JSIConverter<double>::toJSI(runtime, arg.duration));
+      obj.setProperty(runtime, "pcmFormat", JSIConverter<std::optional<margelo::nitro::nitroscreenrecorder::PCMFormatInfo>>::toJSI(runtime, arg.pcmFormat));
       return obj;
     }
     static inline bool canConvert(jsi::Runtime& runtime, const jsi::Value& value) {
@@ -80,6 +86,7 @@ namespace margelo::nitro {
       if (!JSIConverter<std::string>::canConvert(runtime, obj.getProperty(runtime, "name"))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, "size"))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, "duration"))) return false;
+      if (!JSIConverter<std::optional<margelo::nitro::nitroscreenrecorder::PCMFormatInfo>>::canConvert(runtime, obj.getProperty(runtime, "pcmFormat"))) return false;
       return true;
     }
   };

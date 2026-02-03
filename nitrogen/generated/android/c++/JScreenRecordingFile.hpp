@@ -12,6 +12,8 @@
 
 #include "AudioRecordingFile.hpp"
 #include "JAudioRecordingFile.hpp"
+#include "JPCMFormatInfo.hpp"
+#include "PCMFormatInfo.hpp"
 #include <optional>
 #include <string>
 

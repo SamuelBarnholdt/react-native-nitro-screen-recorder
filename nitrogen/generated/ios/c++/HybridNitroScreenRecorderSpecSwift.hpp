@@ -32,6 +32,8 @@ namespace margelo::nitro::nitroscreenrecorder { enum class CameraDevice; }
 namespace margelo::nitro::nitroscreenrecorder { struct ScreenRecordingFile; }
 // Forward declaration of `AudioRecordingFile` to properly resolve imports.
 namespace margelo::nitro::nitroscreenrecorder { struct AudioRecordingFile; }
+// Forward declaration of `PCMFormatInfo` to properly resolve imports.
+namespace margelo::nitro::nitroscreenrecorder { struct PCMFormatInfo; }
 // Forward declaration of `RecordingError` to properly resolve imports.
 namespace margelo::nitro::nitroscreenrecorder { struct RecordingError; }
 // Forward declaration of `RawExtensionStatus` to properly resolve imports.
@@ -53,6 +55,7 @@ namespace margelo::nitro::nitroscreenrecorder { enum class CaptureMode; }
 #include "ScreenRecordingFile.hpp"
 #include <string>
 #include "AudioRecordingFile.hpp"
+#include "PCMFormatInfo.hpp"
 #include "RecordingError.hpp"
 #include "RawExtensionStatus.hpp"
 #include "CaptureMode.hpp"
@@ -271,6 +274,14 @@ namespace margelo::nitro::nitroscreenrecorder {
       if (__result.hasError()) [[unlikely]] {
         std::rethrow_exception(__result.error());
       }
+    }
+    inline std::vector<std::string> getAudioDiagnostics() override {
+      auto __result = _swiftPart.getAudioDiagnostics();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+      auto __value = std::move(__result.value());
+      return __value;
     }
     inline void clearRecordingCache() override {
       auto __result = _swiftPart.clearRecordingCache();

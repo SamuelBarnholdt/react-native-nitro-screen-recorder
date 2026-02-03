@@ -384,7 +384,8 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
         path: audioURL.absoluteString,
         name: audioURL.lastPathComponent,
         size: attrs[.size] as? Double ?? 0,
-        duration: duration
+        duration: duration,
+        pcmFormat: nil
       )
 
       print("✅ Separate audio recording stopped: \(audioURL.path)")
@@ -901,12 +902,13 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
       let audioSourceURL = docsURL.appendingPathComponent(audioFileName)
 
       if fm.fileExists(atPath: audioSourceURL.path) {
-        // Copy mic audio file to caches
+        // Preserve original extension (.pcm for raw audio)
+        let ext = audioSourceURL.pathExtension
         var audioDestinationURL = recordingsDir.appendingPathComponent(audioFileName)
         if fm.fileExists(atPath: audioDestinationURL.path) {
           let ts = Int(Date().timeIntervalSince1970)
           let base = audioSourceURL.deletingPathExtension().lastPathComponent
-          audioDestinationURL = recordingsDir.appendingPathComponent("\(base)-\(ts).m4a")
+          audioDestinationURL = recordingsDir.appendingPathComponent("\(base)-\(ts).\(ext)")
         }
 
         do {
@@ -916,16 +918,27 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
           let audioAttrs = try fm.attributesOfItem(atPath: audioDestinationURL.path)
           let audioSize = (audioAttrs[.size] as? NSNumber)?.doubleValue ?? 0.0
 
-          let audioAsset = AVURLAsset(url: audioDestinationURL)
-          let audioDuration = CMTimeGetSeconds(audioAsset.duration)
+          // Compute duration: for PCM files, estimate from file size
+          let audioDuration: Double
+          if ext == "pcm" {
+            // PCM: assume 48kHz, mono, 16-bit if no metadata available
+            let defaultBytesPerFrame = 2  // 16-bit mono
+            let defaultSampleRate = 48000.0
+            audioDuration = audioSize / Double(defaultBytesPerFrame) / defaultSampleRate
+            print("   PCM duration estimated: \(audioDuration)s (48kHz mono 16-bit)")
+          } else {
+            let audioAsset = AVURLAsset(url: audioDestinationURL)
+            audioDuration = CMTimeGetSeconds(audioAsset.duration)
+          }
 
           audioFile = AudioRecordingFile(
             path: audioDestinationURL.absoluteString,
             name: audioDestinationURL.lastPathComponent,
             size: audioSize,
-            duration: audioDuration
+            duration: audioDuration,
+            pcmFormat: nil
           )
-          print("✅ Retrieved separate mic audio file: \(audioDestinationURL.path)")
+          print("✅ Retrieved separate mic audio file: \(audioDestinationURL.path) (duration: \(audioDuration)s)")
         } catch {
           print("⚠️ Failed to copy mic audio file: \(error.localizedDescription)")
         }
@@ -964,7 +977,8 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
             path: appAudioDestinationURL.absoluteString,
             name: appAudioDestinationURL.lastPathComponent,
             size: appAudioSize,
-            duration: appAudioDuration
+            duration: appAudioDuration,
+            pcmFormat: nil
           )
           print("✅ Retrieved separate app audio file: \(appAudioDestinationURL.path)")
         } catch {
@@ -1007,6 +1021,67 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
 
     // Read queue
     var chunks = defaults.array(forKey: "PendingChunks") as? [[String: Any]] ?? []
+    
+    // === COMPREHENSIVE QUEUE LOGGING ===
+    print("📦 retrieveGlobalRecording: === QUEUE DUMP ===")
+    print("   Requested chunkId: \(chunkId ?? "nil (LIFO)")")
+    print("   Total chunks in queue: \(chunks.count)")
+    
+    // List all available files in app group Documents
+    let allFiles = (try? fm.contentsOfDirectory(at: docsURL, includingPropertiesForKeys: [.fileSizeKey, .creationDateKey])) ?? []
+    print("   Files in app group Documents (\(allFiles.count)):")
+    for file in allFiles.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+      let attrs = try? fm.attributesOfItem(atPath: file.path)
+      let size = (attrs?[.size] as? Int64) ?? 0
+      let created = attrs?[.creationDate] as? Date
+      let dateStr = created.map { ISO8601DateFormatter().string(from: $0) } ?? "unknown"
+      print("     - \(file.lastPathComponent) (\(size) bytes, created: \(dateStr))")
+    }
+    
+    // Dump queue entries
+    for (idx, chunk) in chunks.enumerated() {
+      let id = chunk["chunkId"] as? String ?? "nil"
+      let video = chunk["video"] as? String ?? "nil"
+      let micAudio = chunk["micAudio"] as? String ?? "nil"
+      let appAudio = chunk["appAudio"] as? String ?? "nil"
+      let hadSep = chunk["hadSeparateAudio"] as? Bool ?? false
+      let savedAt = chunk["savedAt"] as? TimeInterval ?? 0
+      let savedDate = savedAt > 0 ? ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: savedAt)) : "unknown"
+      
+      // Check if files actually exist
+      let videoExists = fm.fileExists(atPath: docsURL.appendingPathComponent(video).path)
+      let micExists = micAudio != "nil" && fm.fileExists(atPath: docsURL.appendingPathComponent(micAudio).path)
+      let appExists = appAudio != "nil" && fm.fileExists(atPath: docsURL.appendingPathComponent(appAudio).path)
+      
+      print("   Chunk[\(idx)]: id=\(id), video=\(video)(exists:\(videoExists)), mic=\(micAudio)(exists:\(micExists)), app=\(appAudio)(exists:\(appExists)), hadSeparate=\(hadSep), savedAt=\(savedDate)")
+      
+      // Log PCM info if available
+      if let pcmInfo = chunk["micPcmInfo"] as? [String: Any] {
+        let rate = pcmInfo["sampleRate"] as? Double ?? 0
+        let channels = pcmInfo["channelCount"] ?? 0
+        let bits = pcmInfo["bitsPerChannel"] ?? 0
+        let bytes = pcmInfo["bytesWritten"] as? Int64 ?? 0
+        let dur = pcmInfo["duration"] as? Double ?? 0
+        print("     PCM info: rate=\(rate), ch=\(channels), bits=\(bits), bytes=\(bytes), dur=\(dur)s")
+      }
+    }
+    
+    // Fetch and log audio diagnostics from extension
+    if let audioDiagData = defaults.array(forKey: "ExtensionAudioDiagnostics") as? [[String: Any]] {
+      print("   === AUDIO DIAGNOSTICS (last \(audioDiagData.count) chunks) ===")
+      for (idx, entry) in audioDiagData.suffix(5).enumerated() {
+        let entryId = entry["chunkId"] as? String ?? "nil"
+        let logs = entry["logs"] as? [String] ?? []
+        print("   AudioDiag[\(idx)]: chunkId=\(entryId), logCount=\(logs.count)")
+        // Show last 5 log lines for recent chunks
+        if idx == audioDiagData.count - 1 {
+          for log in logs.suffix(10) {
+            print("     \(log)")
+          }
+        }
+      }
+    }
+    print("   === END QUEUE DUMP ===")
 
     if chunks.isEmpty {
       print("⚠️ retrieveGlobalRecording: Queue is empty - extension may not have saved the chunk")
@@ -1041,15 +1116,55 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
     // Extract chunk info
     guard let videoFileName = chunkEntry["video"] as? String else {
       print("❌ retrieveGlobalRecording: Chunk entry missing 'video' field")
+      print("   Full chunk entry: \(chunkEntry)")
       return nil
     }
     let micAudioFileName = chunkEntry["micAudio"] as? String
     let appAudioFileName = chunkEntry["appAudio"] as? String
     let micEnabled = chunkEntry["micEnabled"] as? Bool ?? false
     let hadSeparateAudio = chunkEntry["hadSeparateAudio"] as? Bool ?? false
+    
+    // === SELECTED CHUNK DETAILS ===
+    print("📦 retrieveGlobalRecording: === SELECTED CHUNK ===")
+    print("   chunkId: \(chunkEntry["chunkId"] as? String ?? "nil")")
+    print("   video: \(videoFileName)")
+    print("   micAudio: \(micAudioFileName ?? "nil")")
+    print("   appAudio: \(appAudioFileName ?? "nil")")
+    print("   micEnabled: \(micEnabled), hadSeparateAudio: \(hadSeparateAudio)")
+    print("   savedAt: \(chunkEntry["savedAt"] as? TimeInterval ?? 0)")
+    
+    // Check file sizes before retrieval
+    let videoSourceURL = docsURL.appendingPathComponent(videoFileName)
+    let videoAttrs = try? fm.attributesOfItem(atPath: videoSourceURL.path)
+    let videoSize = (videoAttrs?[.size] as? Int64) ?? 0
+    print("   Video file size: \(videoSize) bytes")
+    
+    if let micFile = micAudioFileName {
+      let micURL = docsURL.appendingPathComponent(micFile)
+      let micAttrs = try? fm.attributesOfItem(atPath: micURL.path)
+      let micSize = (micAttrs?[.size] as? Int64) ?? 0
+      let micExists = fm.fileExists(atPath: micURL.path)
+      print("   Mic audio file: \(micFile), exists: \(micExists), size: \(micSize) bytes")
+    }
+    
+    if let appFile = appAudioFileName {
+      let appURL = docsURL.appendingPathComponent(appFile)
+      let appAttrs = try? fm.attributesOfItem(atPath: appURL.path)
+      let appSize = (appAttrs?[.size] as? Int64) ?? 0
+      let appExists = fm.fileExists(atPath: appURL.path)
+      print("   App audio file: \(appFile), exists: \(appExists), size: \(appSize) bytes")
+    }
+    
+    // Check for mismatch: queue says audio exists but file doesn't
+    if hadSeparateAudio && micAudioFileName != nil {
+      let micURL = docsURL.appendingPathComponent(micAudioFileName!)
+      if !fm.fileExists(atPath: micURL.path) {
+        print("   ⚠️ MISMATCH: hadSeparateAudio=true but mic file missing!")
+      }
+    }
+    print("   === END SELECTED CHUNK ===")
 
     // Verify video file exists
-    let videoSourceURL = docsURL.appendingPathComponent(videoFileName)
     guard fm.fileExists(atPath: videoSourceURL.path) else {
       print("⚠️ retrieveGlobalRecording: Video file not found at \(videoSourceURL.path)")
       print("   Removing orphaned queue entry")
@@ -1080,31 +1195,77 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
     print("✅ Copied video to caches: \(videoFileName)")
 
     // STEP 2: Copy audio files (if they exist)
+    // Get PCM format info if available (for computing duration from raw PCM)
+    let micPcmInfo = chunkEntry["micPcmInfo"] as? [String: Any]
+    
     var audioFile: AudioRecordingFile? = nil
     if hadSeparateAudio, let micFileName = micAudioFileName {
       let micSourceURL = docsURL.appendingPathComponent(micFileName)
       if fm.fileExists(atPath: micSourceURL.path) {
+        // Preserve the original extension (.pcm for raw audio)
+        let ext = micSourceURL.pathExtension
         var micDestURL = recordingsDir.appendingPathComponent(micFileName)
         if fm.fileExists(atPath: micDestURL.path) {
           let ts = Int(Date().timeIntervalSince1970)
           let base = micSourceURL.deletingPathExtension().lastPathComponent
-          micDestURL = recordingsDir.appendingPathComponent("\(base)-\(ts).m4a")
+          micDestURL = recordingsDir.appendingPathComponent("\(base)-\(ts).\(ext)")
         }
         do {
           try fm.copyItem(at: micSourceURL, to: micDestURL)
 
           let micAttrs = try fm.attributesOfItem(atPath: micDestURL.path)
           let micSize = (micAttrs[.size] as? NSNumber)?.doubleValue ?? 0.0
-          let micAsset = AVURLAsset(url: micDestURL)
-          let micDuration = CMTimeGetSeconds(micAsset.duration)
+          
+          // Compute duration: use PCM info if available, else try AVAsset (for .m4a)
+          let micDuration: Double
+          if let pcmInfo = micPcmInfo,
+             let pcmDuration = pcmInfo["duration"] as? Double {
+            // Use pre-computed duration from PCM metadata
+            micDuration = pcmDuration
+            print("   PCM duration from metadata: \(micDuration)s")
+          } else if ext == "pcm",
+                    let pcmInfo = micPcmInfo,
+                    let sampleRate = pcmInfo["sampleRate"] as? Double,
+                    let channelCount = pcmInfo["channelCount"] as? Int,
+                    let bitsPerChannel = pcmInfo["bitsPerChannel"] as? Int,
+                    sampleRate > 0, channelCount > 0, bitsPerChannel > 0 {
+            // Compute duration from file size and format
+            let bytesPerFrame = (bitsPerChannel / 8) * channelCount
+            micDuration = micSize / Double(bytesPerFrame) / sampleRate
+            print("   PCM duration computed: \(micDuration)s (rate=\(sampleRate), bytes=\(Int(micSize)))")
+          } else if ext != "pcm" {
+            // AAC file - use AVAsset
+            let micAsset = AVURLAsset(url: micDestURL)
+            micDuration = CMTimeGetSeconds(micAsset.duration)
+          } else {
+            // PCM without metadata - try to estimate with defaults (48kHz, mono, 16-bit)
+            let defaultBytesPerFrame = 2  // 16-bit mono
+            let defaultSampleRate = 48000.0
+            micDuration = micSize / Double(defaultBytesPerFrame) / defaultSampleRate
+            print("   PCM duration estimated with defaults: \(micDuration)s")
+          }
 
+          // Build PCM format info if available
+          var pcmFormat: PCMFormatInfo? = nil
+          if let pcmInfo = micPcmInfo {
+            pcmFormat = PCMFormatInfo(
+              sampleRate: pcmInfo["sampleRate"] as? Double ?? 48000,
+              channelCount: pcmInfo["channelCount"] as? Double ?? 1,
+              bitsPerChannel: pcmInfo["bitsPerChannel"] as? Double ?? 16,
+              isFloat: pcmInfo["isFloat"] as? Bool ?? false,
+              isInterleaved: pcmInfo["isInterleaved"] as? Bool ?? true,
+              bytesPerFrame: pcmInfo["bytesPerFrame"] as? Double ?? 2
+            )
+          }
+          
           audioFile = AudioRecordingFile(
             path: micDestURL.absoluteString,
             name: micDestURL.lastPathComponent,
             size: micSize,
-            duration: micDuration
+            duration: micDuration,
+            pcmFormat: pcmFormat
           )
-          print("✅ Copied mic audio to caches: \(micFileName)")
+          print("✅ Copied mic audio to caches: \(micFileName) (duration: \(micDuration)s)")
         } catch {
           print("⚠️ Failed to copy mic audio: \(error)")
         }
@@ -1133,7 +1294,8 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
             path: appDestURL.absoluteString,
             name: appDestURL.lastPathComponent,
             size: appSize,
-            duration: appDuration
+            duration: appDuration,
+            pcmFormat: nil
           )
           print("✅ Copied app audio to caches: \(appFileName)")
         } catch {
@@ -1170,8 +1332,41 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
     let size = (attrs[.size] as? NSNumber)?.doubleValue ?? 0.0
     let asset = AVURLAsset(url: videoDestURL)
     let duration = CMTimeGetSeconds(asset.duration)
-
-    print("✅ retrieveGlobalRecording complete: \(videoFileName), duration=\(duration)s")
+    
+    // === FINAL RESULT SUMMARY ===
+    print("📦 retrieveGlobalRecording: === FINAL RESULT ===")
+    print("   Video: \(videoDestURL.lastPathComponent)")
+    print("   Video size: \(size) bytes (\(String(format: "%.1f", size / 1024)) KB)")
+    print("   Video duration: \(duration)s")
+    
+    // Sanity check: very short duration might indicate empty/corrupted file
+    if duration < 0.1 {
+      print("   ⚠️ WARNING: Video duration < 100ms - possibly empty or corrupted!")
+    }
+    if size < 1000 {
+      print("   ⚠️ WARNING: Video size < 1KB - possibly empty!")
+    }
+    
+    if let audio = audioFile {
+      print("   Mic audio: \(audio.name), size=\(audio.size) bytes, duration=\(audio.duration)s")
+      if audio.duration < 0.1 {
+        print("   ⚠️ WARNING: Mic audio duration < 100ms!")
+      }
+      if audio.size < 100 {
+        print("   ⚠️ WARNING: Mic audio size < 100 bytes - likely empty!")
+      }
+    } else if hadSeparateAudio {
+      print("   ⚠️ Mic audio: MISSING (hadSeparateAudio=true but no file returned)")
+    } else {
+      print("   Mic audio: (not enabled)")
+    }
+    
+    if let appAudio = appAudioFile {
+      print("   App audio: \(appAudio.name), size=\(appAudio.size) bytes, duration=\(appAudio.duration)s")
+    } else {
+      print("   App audio: (none)")
+    }
+    print("   === END FINAL RESULT ===")
 
     return ScreenRecordingFile(
       path: videoDestURL.absoluteString,
@@ -1263,6 +1458,61 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
       else { return nil }
       return "[\(level)] \(time): \(message)"
     }
+  }
+
+  /**
+   Returns detailed audio diagnostics from the broadcast extension.
+   Includes per-sample logging, append failures, format changes, and more.
+   Use this to debug audio-specific issues like empty audio files.
+   */
+  func getAudioDiagnostics() throws -> [String] {
+    guard let appGroupId = try? getAppGroupIdentifier(),
+          let defaults = UserDefaults(suiteName: appGroupId)
+    else {
+      return ["Error: Could not access app group"]
+    }
+    
+    guard let diagEntries = defaults.array(forKey: "ExtensionAudioDiagnostics") as? [[String: Any]] else {
+      return ["No audio diagnostics available"]
+    }
+    
+    var result: [String] = []
+    
+    for entry in diagEntries {
+      let timestamp = entry["timestamp"] as? String ?? "unknown"
+      let chunkId = entry["chunkId"] as? String ?? "nil"
+      
+      result.append("=== Audio Diagnostics [\(timestamp)] chunkId=\(chunkId) ===")
+      
+      if let diagnostics = entry["diagnostics"] as? [String: Any] {
+        // Key metrics
+        let received = diagnostics["micSamplesReceived"] as? Int ?? 0
+        let written = diagnostics["totalSeparateAudioSamples"] as? Int ?? 0
+        let failures = diagnostics["separateAudioAppendFailures"] as? Int ?? 0
+        let lastError = diagnostics["lastSeparateAudioAppendError"] as? String ?? "none"
+        
+        result.append("MIC: received=\(received), written=\(written), failures=\(failures)")
+        result.append("LAST ERROR: \(lastError)")
+        
+        // All diagnostics as key=value
+        for (key, value) in diagnostics.sorted(by: { $0.key < $1.key }) {
+          result.append("  \(key)=\(value)")
+        }
+      }
+      
+      // Audio logs
+      if let logs = entry["logs"] as? [String] {
+        result.append("--- Audio Log (\(logs.count) entries) ---")
+        for log in logs {
+          result.append("  \(log)")
+        }
+      }
+      
+      result.append("=== End Diagnostics ===")
+      result.append("")
+    }
+    
+    return result
   }
 
   /**

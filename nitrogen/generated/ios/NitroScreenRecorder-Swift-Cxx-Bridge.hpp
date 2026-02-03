@@ -14,6 +14,8 @@ namespace margelo::nitro::nitroscreenrecorder { struct AudioRecordingFile; }
 namespace margelo::nitro::nitroscreenrecorder { enum class BroadcastPickerPresentationEvent; }
 // Forward declaration of `HybridNitroScreenRecorderSpec` to properly resolve imports.
 namespace margelo::nitro::nitroscreenrecorder { class HybridNitroScreenRecorderSpec; }
+// Forward declaration of `PCMFormatInfo` to properly resolve imports.
+namespace margelo::nitro::nitroscreenrecorder { struct PCMFormatInfo; }
 // Forward declaration of `PermissionResponse` to properly resolve imports.
 namespace margelo::nitro::nitroscreenrecorder { struct PermissionResponse; }
 // Forward declaration of `PermissionStatus` to properly resolve imports.
@@ -39,6 +41,7 @@ namespace NitroScreenRecorder { class HybridNitroScreenRecorderSpec_cxx; }
 #include "AudioRecordingFile.hpp"
 #include "BroadcastPickerPresentationEvent.hpp"
 #include "HybridNitroScreenRecorderSpec.hpp"
+#include "PCMFormatInfo.hpp"
 #include "PermissionResponse.hpp"
 #include "PermissionStatus.hpp"
 #include "RawExtensionStatus.hpp"
@@ -175,6 +178,21 @@ namespace margelo::nitro::nitroscreenrecorder::bridge::swift {
     return optional.has_value();
   }
   inline double get_std__optional_double_(const std::optional<double>& optional) noexcept {
+    return *optional;
+  }
+  
+  // pragma MARK: std::optional<PCMFormatInfo>
+  /**
+   * Specialized version of `std::optional<PCMFormatInfo>`.
+   */
+  using std__optional_PCMFormatInfo_ = std::optional<PCMFormatInfo>;
+  inline std::optional<PCMFormatInfo> create_std__optional_PCMFormatInfo_(const PCMFormatInfo& value) noexcept {
+    return std::optional<PCMFormatInfo>(value);
+  }
+  inline bool has_value_std__optional_PCMFormatInfo_(const std::optional<PCMFormatInfo>& optional) noexcept {
+    return optional.has_value();
+  }
+  inline PCMFormatInfo get_std__optional_PCMFormatInfo_(const std::optional<PCMFormatInfo>& optional) noexcept {
     return *optional;
   }
   

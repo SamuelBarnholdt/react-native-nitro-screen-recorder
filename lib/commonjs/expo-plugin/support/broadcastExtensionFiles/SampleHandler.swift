@@ -120,6 +120,49 @@ final class SampleHandler: RPBroadcastSampleHandler {
     logInfo(summary)
   }
 
+  /// Saves detailed audio diagnostics and logs to the shared container for debugging
+  private func saveAudioDiagnostics(diagnostics: [String: Any], logs: [String], chunkId: String?) {
+    guard let groupID = hostAppGroupIdentifier,
+      let defaults = UserDefaults(suiteName: groupID)
+    else {
+      logError("saveAudioDiagnostics: No app group identifier")
+      return
+    }
+
+    let timestamp = ISO8601DateFormatter().string(from: Date())
+    var entry: [String: Any] = [
+      "timestamp": timestamp,
+      "diagnostics": diagnostics,
+      "logCount": logs.count,
+    ]
+
+    if let id = chunkId {
+      entry["chunkId"] = id
+    }
+
+    // Store last 200 audio log lines (most recent)
+    let recentLogs = logs.suffix(200)
+    entry["logs"] = Array(recentLogs)
+
+    // Store in a separate key for detailed audio diagnostics
+    var audioDiagLog = defaults.array(forKey: "ExtensionAudioDiagnostics") as? [[String: Any]] ?? []
+    audioDiagLog.append(entry)
+
+    // Keep only last 20 diagnostic dumps (they're large)
+    if audioDiagLog.count > 20 {
+      audioDiagLog = Array(audioDiagLog.suffix(20))
+    }
+
+    defaults.set(audioDiagLog, forKey: "ExtensionAudioDiagnostics")
+    defaults.synchronize()
+
+    // Log summary
+    let received = diagnostics["micSamplesReceived"] as? Int ?? 0
+    let written = diagnostics["totalSeparateAudioSamples"] as? Int ?? 0
+    let failures = diagnostics["separateAudioAppendFailures"] as? Int ?? 0
+    logInfo("🔊 AudioDiag: received=\(received), written=\(written), failures=\(failures), logs=\(logs.count)")
+  }
+
   // Store both the CFString and CFNotificationName versions for all notifications
   private static let stopNotificationString = "com.nitroscreenrecorder.stopBroadcast" as CFString
   private static let stopNotificationName = CFNotificationName(stopNotificationString)
@@ -149,7 +192,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
   private var isCapturing = false
   private var chunkStartedAt: Double = 0
 
-  // MARK: - Audio Session Interruption Handling (Issue 1)
+  // MARK: - Audio Session Interruption Handling
   private var interruptionObserver: NSObjectProtocol?
   private var routeChangeObserver: NSObjectProtocol?
   private var isAudioInterrupted: Bool = false
@@ -185,9 +228,6 @@ final class SampleHandler: RPBroadcastSampleHandler {
     fileManager.removeFileIfExists(url: audioNodeURL)
     fileManager.removeFileIfExists(url: appAudioNodeURL)
     super.init()
-
-    // DEBUG: Print to system console (doesn't depend on App Group)
-    print("🏁 [BroadcastExtension] SampleHandler init() - extension is being loaded!")
   }
 
   deinit {
@@ -200,7 +240,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
     CFNotificationCenterRemoveObserver(
       center, observer, SampleHandler.finalizeChunkNotificationName, nil)
 
-    // Clean up audio session observers (Issue 1)
+    // Clean up audio session observers
     if let observer = interruptionObserver {
       NotificationCenter.default.removeObserver(observer)
     }
@@ -262,10 +302,6 @@ final class SampleHandler: RPBroadcastSampleHandler {
 
   // MARK: – Broadcast lifecycle
   override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
-    // DEBUG: Print to system console FIRST (doesn't depend on App Group)
-    print("🚀 [BroadcastExtension] broadcastStarted called!")
-    print("🚀 [BroadcastExtension] hostAppGroupIdentifier = \(hostAppGroupIdentifier ?? "NIL")")
-
     startListeningForNotifications()
 
     // Mark broadcast as active
@@ -289,7 +325,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
         "broadcastStarted: Failed to configure audio session: \(error.localizedDescription)")
     }
 
-    // Setup audio session interruption observers (Issue 1)
+    // Setup audio session interruption observers
     setupAudioSessionObservers()
 
     guard let groupID = hostAppGroupIdentifier else {
@@ -326,6 +362,10 @@ final class SampleHandler: RPBroadcastSampleHandler {
         separateAudioFile: separateAudioFile
       )
       try writer?.start()
+      
+      // Initialize audio logs for first chunk
+      writer?.resetAudioLogsForChunk(chunkId: "initial-broadcast")
+      
       logInfo("broadcastStarted: Writer started successfully, output=\(nodeURL.lastPathComponent)")
     } catch {
       logError("broadcastStarted: Failed to create/start writer: \(error.localizedDescription)")
@@ -333,7 +373,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
     }
   }
 
-  // MARK: - Audio Session Interruption Handling (Issue 1)
+  // MARK: - Audio Session Interruption Handling
 
   private func setupAudioSessionObservers() {
     let nc = NotificationCenter.default
@@ -463,36 +503,10 @@ final class SampleHandler: RPBroadcastSampleHandler {
   private var lastVideoFrameTime: Date?
   private var totalVideoFrames: Int = 0
 
-  // Debug: track first buffer received for each type
-  private var receivedFirstVideo = false
-  private var receivedFirstMic = false
-  private var receivedFirstAppAudio = false
-
   override func processSampleBuffer(
     _ sampleBuffer: CMSampleBuffer,
     with sampleBufferType: RPSampleBufferType
   ) {
-    // DEBUG: Log first buffer of each type (doesn't depend on App Group)
-    switch sampleBufferType {
-    case .video:
-      if !receivedFirstVideo {
-        receivedFirstVideo = true
-        print("🎬 [BroadcastExtension] First VIDEO buffer received!")
-      }
-    case .audioMic:
-      if !receivedFirstMic {
-        receivedFirstMic = true
-        print("🎤 [BroadcastExtension] First MIC buffer received!")
-      }
-    case .audioApp:
-      if !receivedFirstAppAudio {
-        receivedFirstAppAudio = true
-        print("🔊 [BroadcastExtension] First APP AUDIO buffer received!")
-      }
-    @unknown default:
-      break
-    }
-
     // Use sync to ensure thread safety with writer swaps
     writerQueue.sync {
       guard let writer = self.writer else {
@@ -535,7 +549,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
           self.frameCount = 0
           self.updateExtensionStatus()
 
-          // Issue 4: Periodic check for writer failure
+          // Periodic check for writer failure
           if writer.hasFailed {
             self.logError("Writer has FAILED: \(writer.failureError?.localizedDescription ?? "unknown")")
           }
@@ -645,6 +659,10 @@ final class SampleHandler: RPBroadcastSampleHandler {
 
       // Create new writer with fresh file URLs
       self.createNewWriter()
+      
+      // Reset audio logs for the new chunk
+      self.writer?.resetAudioLogsForChunk(chunkId: self.pendingChunkId)
+      
       let totalTime = Int(Date().timeIntervalSince(markStartTime) * 1000)
       self.logInfo("handleMarkChunk: New chunk started (total lock time: \(totalTime)ms)")
     }
@@ -779,12 +797,21 @@ final class SampleHandler: RPBroadcastSampleHandler {
         audioMetrics["chunkId"] = chunkId
       }
       self.logAudioMetrics(audioMetrics, context: "handleFinalizeChunk")
+      
+      // Save detailed audio diagnostics and logs
+      let audioDiagnostics = currentWriter.getAudioDiagnostics()
+      let audioLogs = currentWriter.getAudioLogs()
+      self.saveAudioDiagnostics(diagnostics: audioDiagnostics, logs: audioLogs, chunkId: self.pendingChunkId)
 
       // Save the chunk to shared container
       self.saveChunkToContainer(result: result)
 
       // Create new writer with fresh file URLs
       self.createNewWriter()
+      
+      // Reset audio logs for the new chunk (next pendingChunkId will be set on next markChunk)
+      self.writer?.resetAudioLogsForChunk(chunkId: "post-finalize")
+      
       let totalTime = Int(Date().timeIntervalSince(finalizeStartTime) * 1000)
       self.logInfo("handleFinalizeChunk: New chunk started (total lock time: \(totalTime)ms)")
     }
@@ -819,7 +846,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
 
       audioNodeURL = fileManager.temporaryDirectory
         .appendingPathComponent("\(uuid)_mic_audio")
-        .appendingPathExtension("m4a")
+        .appendingPathExtension("pcm")  // Raw PCM audio (no AAC encoding)
 
       appAudioNodeURL = fileManager.temporaryDirectory
         .appendingPathComponent("\(uuid)_app_audio")
@@ -988,6 +1015,20 @@ final class SampleHandler: RPBroadcastSampleHandler {
     if let app = appAudioFileName {
       entry["appAudio"] = app
     }
+    
+    // Add PCM format info for mic audio (needed to compute duration)
+    if let pcmInfo = result.micPcmInfo {
+      entry["micPcmInfo"] = [
+        "sampleRate": pcmInfo.sampleRate,
+        "channelCount": pcmInfo.channelCount,
+        "bitsPerChannel": pcmInfo.bitsPerChannel,
+        "isFloat": pcmInfo.isFloat,
+        "isInterleaved": pcmInfo.isInterleaved,
+        "bytesWritten": pcmInfo.bytesWritten,
+        "duration": pcmInfo.duration,
+      ] as [String: Any]
+      self.logInfo("saveChunkToContainer: PCM info - rate=\(pcmInfo.sampleRate), bytes=\(pcmInfo.bytesWritten), duration=\(pcmInfo.duration)s")
+    }
 
     // Add to queue (replace if same chunkId exists to handle retries)
     var chunks = defaults.array(forKey: "PendingChunks") as? [[String: Any]] ?? []
@@ -1121,6 +1162,20 @@ final class SampleHandler: RPBroadcastSampleHandler {
     }
     if let app = appAudioFileName {
       entry["appAudio"] = app
+    }
+    
+    // Add PCM format info for mic audio (needed to compute duration)
+    if let pcmInfo = result.micPcmInfo {
+      entry["micPcmInfo"] = [
+        "sampleRate": pcmInfo.sampleRate,
+        "channelCount": pcmInfo.channelCount,
+        "bitsPerChannel": pcmInfo.bitsPerChannel,
+        "isFloat": pcmInfo.isFloat,
+        "isInterleaved": pcmInfo.isInterleaved,
+        "bytesWritten": pcmInfo.bytesWritten,
+        "duration": pcmInfo.duration,
+      ] as [String: Any]
+      debugPrint("✅ broadcastFinished: PCM info - rate=\(pcmInfo.sampleRate), bytes=\(pcmInfo.bytesWritten), duration=\(pcmInfo.duration)s")
     }
 
     // Add to queue (replace if same chunkId exists)

@@ -15,6 +15,8 @@ namespace margelo::nitro::nitroscreenrecorder { struct PermissionResponse; }
 namespace margelo::nitro::nitroscreenrecorder { struct ScreenRecordingFile; }
 // Forward declaration of `AudioRecordingFile` to properly resolve imports.
 namespace margelo::nitro::nitroscreenrecorder { struct AudioRecordingFile; }
+// Forward declaration of `PCMFormatInfo` to properly resolve imports.
+namespace margelo::nitro::nitroscreenrecorder { struct PCMFormatInfo; }
 // Forward declaration of `RawExtensionStatus` to properly resolve imports.
 namespace margelo::nitro::nitroscreenrecorder { struct RawExtensionStatus; }
 // Forward declaration of `CaptureMode` to properly resolve imports.
@@ -46,6 +48,8 @@ namespace margelo::nitro::nitroscreenrecorder { struct RecordingError; }
 #include <string>
 #include "AudioRecordingFile.hpp"
 #include "JAudioRecordingFile.hpp"
+#include "PCMFormatInfo.hpp"
+#include "JPCMFormatInfo.hpp"
 #include "RawExtensionStatus.hpp"
 #include "JRawExtensionStatus.hpp"
 #include "CaptureMode.hpp"
@@ -284,6 +288,20 @@ namespace margelo::nitro::nitroscreenrecorder {
   void JHybridNitroScreenRecorderSpec::clearExtensionAudioMetrics() {
     static const auto method = javaClassStatic()->getMethod<void()>("clearExtensionAudioMetrics");
     method(_javaPart);
+  }
+  std::vector<std::string> JHybridNitroScreenRecorderSpec::getAudioDiagnostics() {
+    static const auto method = javaClassStatic()->getMethod<jni::local_ref<jni::JArrayClass<jni::JString>>()>("getAudioDiagnostics");
+    auto __result = method(_javaPart);
+    return [&]() {
+      size_t __size = __result->size();
+      std::vector<std::string> __vector;
+      __vector.reserve(__size);
+      for (size_t __i = 0; __i < __size; __i++) {
+        auto __element = __result->getElement(__i);
+        __vector.push_back(__element->toStdString());
+      }
+      return __vector;
+    }();
   }
   void JHybridNitroScreenRecorderSpec::clearRecordingCache() {
     static const auto method = javaClassStatic()->getMethod<void()>("clearRecordingCache");

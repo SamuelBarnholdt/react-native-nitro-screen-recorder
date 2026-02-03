@@ -207,13 +207,36 @@ export type GlobalRecordingInput = {
 };
 
 /**
+ * PCM audio format metadata for raw audio files.
+ * Used when mic audio is recorded as raw PCM instead of AAC.
+ */
+export interface PCMFormatInfo {
+  /** Sample rate in Hz (e.g., 48000) */
+  sampleRate: number;
+  /** Number of audio channels (1 for mono, 2 for stereo) */
+  channelCount: number;
+  /** Bits per sample (e.g., 16 for 16-bit audio) */
+  bitsPerChannel: number;
+  /** Whether samples are floating-point (vs integer) */
+  isFloat: boolean;
+  /** Whether channels are interleaved (vs planar) */
+  isInterleaved: boolean;
+  /** Bytes per frame (bitsPerChannel / 8 * channelCount) */
+  bytesPerFrame: number;
+}
+
+/**
  * Represents a separate audio file recorded alongside the video.
+ *
+ * Note: On iOS with separateAudioFile enabled, mic audio is recorded as raw PCM
+ * for guaranteed partial recovery during recording, then converted to AAC M4A
+ * on finalization. If conversion fails, the raw .pcm file is kept as fallback.
  *
  * @example
  * ```typescript
  * const audioFile: AudioRecordingFile = {
  *   path: '/path/to/recording.m4a',
- *   name: 'screen_recording_2024_01_15.m4a',
+ *   name: 'mic_audio.m4a',
  *   size: 1048576, // 1MB in bytes
  *   duration: 30.5 // 30.5 seconds
  * };
@@ -222,12 +245,18 @@ export type GlobalRecordingInput = {
 export interface AudioRecordingFile {
   /** Full file system path to the audio file */
   path: string;
-  /** Display name of the audio file */
+  /** Display name of the audio file (may be .pcm or .m4a) */
   name: string;
   /** File size in bytes */
   size: number;
   /** Audio duration in seconds */
   duration: number;
+  /**
+   * PCM format metadata from the original recording (before AAC conversion).
+   * Present if the audio was recorded as PCM. Use to decode .pcm files if
+   * AAC conversion failed and a raw PCM file was returned.
+   */
+  pcmFormat?: PCMFormatInfo;
 }
 
 /**
@@ -271,6 +300,9 @@ export interface ScreenRecordingFile {
   /**
    * Optional separate microphone audio file (when separateAudioFile option is enabled).
    * Contains only the microphone audio track.
+   *
+   * On iOS, audio is recorded as PCM then converted to AAC M4A on finalization.
+   * If conversion fails, a raw .pcm file is returned instead - check the extension.
    */
   audioFile?: AudioRecordingFile;
   /**

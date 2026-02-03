@@ -18,6 +18,8 @@ namespace margelo::nitro::nitroscreenrecorder { enum class CameraDevice; }
 namespace margelo::nitro::nitroscreenrecorder { enum class CaptureMode; }
 // Forward declaration of `HybridNitroScreenRecorderSpec` to properly resolve imports.
 namespace margelo::nitro::nitroscreenrecorder { class HybridNitroScreenRecorderSpec; }
+// Forward declaration of `PCMFormatInfo` to properly resolve imports.
+namespace margelo::nitro::nitroscreenrecorder { struct PCMFormatInfo; }
 // Forward declaration of `PermissionResponse` to properly resolve imports.
 namespace margelo::nitro::nitroscreenrecorder { struct PermissionResponse; }
 // Forward declaration of `PermissionStatus` to properly resolve imports.
@@ -43,6 +45,7 @@ namespace margelo::nitro::nitroscreenrecorder { struct ScreenRecordingFile; }
 #include "CameraDevice.hpp"
 #include "CaptureMode.hpp"
 #include "HybridNitroScreenRecorderSpec.hpp"
+#include "PCMFormatInfo.hpp"
 #include "PermissionResponse.hpp"
 #include "PermissionStatus.hpp"
 #include "RawExtensionStatus.hpp"
