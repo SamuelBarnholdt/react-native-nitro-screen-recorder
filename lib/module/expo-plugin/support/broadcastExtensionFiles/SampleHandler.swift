@@ -677,6 +677,13 @@ final class SampleHandler: RPBroadcastSampleHandler {
       // Reset audio logs for the new chunk
       self.writer?.resetAudioLogsForChunk(chunkId: self.pendingChunkId)
       
+      // Write ack token so main app knows we processed this mark
+      if let groupID = hostAppGroupIdentifier,
+         let token = UserDefaults(suiteName: groupID)?.string(forKey: "MarkChunkToken") {
+        UserDefaults(suiteName: groupID)?.set(token, forKey: "LastProcessedMarkToken")
+        UserDefaults(suiteName: groupID)?.synchronize()
+      }
+      
       let totalTime = Int(Date().timeIntervalSince(markStartTime) * 1000)
       self.logInfo("handleMarkChunk: New chunk started (total lock time: \(totalTime)ms)")
     }
