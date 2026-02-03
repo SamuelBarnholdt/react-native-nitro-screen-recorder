@@ -677,22 +677,67 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
     let markToken = UUID().uuidString
 
     // Also store in UserDefaults for the broadcast extension to read
-    if let appGroupId = try? getAppGroupIdentifier() {
-      let defaults = UserDefaults(suiteName: appGroupId)
-      if let id = chunkId {
-        defaults?.set(id, forKey: "CurrentChunkId")
-      } else {
-        defaults?.removeObject(forKey: "CurrentChunkId")
-      }
-      defaults?.set(markToken, forKey: "MarkChunkToken")
-      defaults?.synchronize()
+    guard let appGroupId = try? getAppGroupIdentifier(),
+          let defaults = UserDefaults(suiteName: appGroupId) else {
+      print("⚠️ markChunkStart: Could not access app group")
+      return
     }
+    
+    if let id = chunkId {
+      defaults.set(id, forKey: "CurrentChunkId")
+    } else {
+      defaults.removeObject(forKey: "CurrentChunkId")
+    }
+    defaults.set(markToken, forKey: "MarkChunkToken")
+    defaults.synchronize()
 
-    // Send notification once (token-based dedupe + retry handles reliability)
+    // Send notification
     let notif = "com.nitroscreenrecorder.markChunk" as CFString
     let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
-    CFNotificationCenterPostNotification(darwinCenter, CFNotificationName(notif), nil, nil, true)
-    print("📍 markChunkStart: Notification sent to broadcast extension, chunkId=\(chunkId ?? "nil"), token=\(markToken)")
+    
+    func sendMarkNotification() {
+      CFNotificationCenterPostNotification(darwinCenter, CFNotificationName(notif), nil, nil, true)
+    }
+    
+    sendMarkNotification()
+    print("📍 markChunkStart: Notification sent, token=\(markToken), chunkId=\(chunkId ?? "nil")")
+    
+    // Poll for ack (non-blocking, short window)
+    // Extension writes LastProcessedMarkToken after processing
+    var acked = false
+    for attempt in 1...5 {
+      // Brief sleep to allow extension to process
+      Thread.sleep(forTimeInterval: 0.02)  // 20ms per attempt = 100ms max
+      defaults.synchronize()  // Force read
+      if let processedToken = defaults.string(forKey: "LastProcessedMarkToken"),
+         processedToken == markToken {
+        acked = true
+        print("📍 markChunkStart: Acked by extension (attempt \(attempt))")
+        break
+      }
+    }
+    
+    if !acked {
+      // Retry once
+      print("⚠️ markChunkStart: No ack, retrying notification...")
+      sendMarkNotification()
+      
+      // Poll again briefly
+      for attempt in 1...5 {
+        Thread.sleep(forTimeInterval: 0.02)
+        defaults.synchronize()
+        if let processedToken = defaults.string(forKey: "LastProcessedMarkToken"),
+           processedToken == markToken {
+          acked = true
+          print("📍 markChunkStart: Acked on retry (attempt \(attempt))")
+          break
+        }
+      }
+      
+      if !acked {
+        print("⚠️ markChunkStart: Still no ack after retry - mark may have been missed")
+      }
+    }
   }
 
   /**
