@@ -165,6 +165,9 @@ final class SampleHandler: RPBroadcastSampleHandler {
 
   // Chunk ID for queue-based retrieval (captured at markChunk, used at save)
   private var pendingChunkId: String?
+  
+  // Token-based dedupe for markChunk (replaces time-based debounce)
+  private var lastMarkChunkToken: String? = nil
 
   // MARK: – Init
   override init() {
@@ -560,23 +563,34 @@ final class SampleHandler: RPBroadcastSampleHandler {
   private let debounceThreshold: TimeInterval = 0.15  // 150ms debounce (accounts for 50ms notification delay + margin)
 
   private func handleMarkChunk() {
-    // Capture arrival time BEFORE entering sync to properly debounce duplicate notifications
-    // (notifications are sent twice 50ms apart for reliability, but we only want to process once)
+    // Capture arrival time BEFORE entering sync for secondary debounce protection
     let arrivalTime = Date().timeIntervalSince1970
     let markStartTime = Date()
 
     writerQueue.sync {
-      // Debounce: ignore if this notification arrived within threshold of the last one
+      // TOKEN-BASED DEDUPE: Ignore if same token as last time
+      if let groupID = hostAppGroupIdentifier,
+         let token = UserDefaults(suiteName: groupID)?.string(forKey: "MarkChunkToken")
+      {
+        if token == self.lastMarkChunkToken {
+          self.logDebug("handleMarkChunk: Ignoring duplicate token \(token)")
+          return  // Skip duplicate
+        }
+        self.lastMarkChunkToken = token
+        self.logDebug("handleMarkChunk: Processing token \(token)")
+      }
+      
+      // (Optional) Keep debounce as secondary protection
       if arrivalTime - self.lastMarkChunkArrivalTime < self.debounceThreshold {
         self.logDebug(
-          "handleMarkChunk: Ignoring duplicate notification (debounce, delta=\(Int((arrivalTime - self.lastMarkChunkArrivalTime) * 1000))ms)"
+          "handleMarkChunk: Ignoring (debounce, delta=\(Int((arrivalTime - self.lastMarkChunkArrivalTime) * 1000))ms)"
         )
         return
       }
       self.lastMarkChunkArrivalTime = arrivalTime
 
       self.logInfo(
-        "handleMarkChunk: Discarding chunk (lock wait: \(Int(Date().timeIntervalSince(markStartTime) * 1000))ms, writerFrames: \(self.videoFramesThisWriter), totalFrames: \(self.totalVideoFrames))"
+        "handleMarkChunk: Processing... (lock wait: \(Int(Date().timeIntervalSince(markStartTime) * 1000))ms, writerFrames: \(self.videoFramesThisWriter), totalFrames: \(self.totalVideoFrames))"
       )
       self.isCapturing = true
       self.chunkStartedAt = Date().timeIntervalSince1970
@@ -612,8 +626,17 @@ final class SampleHandler: RPBroadcastSampleHandler {
 
       // Create new writer with fresh file URLs
       self.createNewWriter()
+      
+      // WRITE ACK TOKEN - Main app polls for this to confirm processing
+      if let groupID = hostAppGroupIdentifier,
+         let token = UserDefaults(suiteName: groupID)?.string(forKey: "MarkChunkToken") {
+        UserDefaults(suiteName: groupID)?.set(token, forKey: "LastProcessedMarkToken")
+        UserDefaults(suiteName: groupID)?.synchronize()
+        self.logDebug("handleMarkChunk: Wrote ack token \(token)")
+      }
+      
       let totalTime = Int(Date().timeIntervalSince(markStartTime) * 1000)
-      self.logInfo("handleMarkChunk: New chunk started (total lock time: \(totalTime)ms)")
+      self.logInfo("handleMarkChunk: Complete (total lock time: \(totalTime)ms)")
     }
   }
 
