@@ -284,12 +284,15 @@ export async function stopGlobalRecording(options?: {
  * ```typescript
  * startGlobalRecording({ onRecordingError: console.error });
  * // User navigates around (content is recorded but uncommitted)
- * markChunkStart('question-5'); // "I care about content starting NOW for question 5"
+ * await markChunkStart('question-5'); // "I care about content starting NOW for question 5"
  * // User does something important...
  * const chunk = await finalizeChunk(); // Get the chunk for question 5
  * ```
  */
-export function markChunkStart(chunkId?: string): void {
+/**
+ * @returns Elapsed time in milliseconds for the mark operation to complete
+ */
+export async function markChunkStart(chunkId?: string): Promise<number> {
   return NitroScreenRecorderHybridObject.markChunkStart(chunkId);
 }
 
@@ -303,14 +306,17 @@ export function markChunkStart(chunkId?: string): void {
  * @param chunkId Optional identifier for the new chunk
  * @example
  * ```typescript
- * markChunkStart('q1'); // Start tracking
+ * await markChunkStart('q1'); // Start tracking
  * // User does something...
- * flushChunk('q1'); // Oops, discard that, start fresh
+ * await flushChunk('q1'); // Oops, discard that, start fresh
  * // User does something else...
  * const chunk = await finalizeChunk(); // Save this instead
  * ```
  */
-export function flushChunk(chunkId?: string): void {
+/**
+ * @returns Elapsed time in milliseconds for the flush operation to complete
+ */
+export async function flushChunk(chunkId?: string): Promise<number> {
   return NitroScreenRecorderHybridObject.markChunkStart(chunkId);
 }
 
@@ -327,14 +333,14 @@ export function flushChunk(chunkId?: string): void {
  * @returns Promise resolving to the finalized chunk file
  * @example
  * ```typescript
- * markChunkStart();
+ * await markChunkStart();
  * // ... user does something important ...
  * const chunk1 = await finalizeChunk();
  * await uploadToServer(chunk1);
  *
  * // On Android, call markChunkStart() again to start next chunk
  * // On iOS, recording continues automatically
- * markChunkStart();
+ * await markChunkStart();
  * const chunk2 = await finalizeChunk();
  * await uploadToServer(chunk2);
  * ```
@@ -393,7 +399,7 @@ export function retrieveLastGlobalRecording(): ScreenRecordingFile | undefined {
  * @example
  * ```typescript
  * // Retrieve by specific ID (recommended for interviews)
- * markChunkStart('question-5');
+ * await markChunkStart('question-5');
  * // ... user answers ...
  * const chunk = await finalizeChunk();
  * // Or manually retrieve:

@@ -475,10 +475,17 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
 
   // --- Chunking ---
 
-  override fun markChunkStart() {
-    Log.d(TAG, "📍 markChunkStart called")
-    globalRecordingService?.markChunkStart() ?: run {
-      Log.w(TAG, "⚠️ markChunkStart: Service not bound")
+  override fun markChunkStart(): Promise<Double> {
+    return Promise.async {
+      val startTime = System.currentTimeMillis()
+      Log.d(TAG, "📍 markChunkStart called")
+      globalRecordingService?.markChunkStart() ?: run {
+        Log.w(TAG, "⚠️ markChunkStart: Service not bound")
+      }
+      // Android doesn't need IPC ack - service call is synchronous
+      val elapsedMs = (System.currentTimeMillis() - startTime).toDouble()
+      Log.d(TAG, "📍 markChunkStart completed in ${elapsedMs.toLong()}ms")
+      elapsedMs
     }
   }
 

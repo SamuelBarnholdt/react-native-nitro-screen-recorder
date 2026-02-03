@@ -153,12 +153,15 @@ export declare function stopGlobalRecording(options?: {
  * ```typescript
  * startGlobalRecording({ onRecordingError: console.error });
  * // User navigates around (content is recorded but uncommitted)
- * markChunkStart('question-5'); // "I care about content starting NOW for question 5"
+ * await markChunkStart('question-5'); // "I care about content starting NOW for question 5"
  * // User does something important...
  * const chunk = await finalizeChunk(); // Get the chunk for question 5
  * ```
  */
-export declare function markChunkStart(chunkId?: string): void;
+/**
+ * @returns Elapsed time in milliseconds for the mark operation to complete
+ */
+export declare function markChunkStart(chunkId?: string): Promise<number>;
 /**
  * Discards any content recorded since the last markChunkStart() or finalizeChunk() call,
  * and begins recording to a fresh file. This is an alias for markChunkStart().
@@ -169,14 +172,17 @@ export declare function markChunkStart(chunkId?: string): void;
  * @param chunkId Optional identifier for the new chunk
  * @example
  * ```typescript
- * markChunkStart('q1'); // Start tracking
+ * await markChunkStart('q1'); // Start tracking
  * // User does something...
- * flushChunk('q1'); // Oops, discard that, start fresh
+ * await flushChunk('q1'); // Oops, discard that, start fresh
  * // User does something else...
  * const chunk = await finalizeChunk(); // Save this instead
  * ```
  */
-export declare function flushChunk(chunkId?: string): void;
+/**
+ * @returns Elapsed time in milliseconds for the flush operation to complete
+ */
+export declare function flushChunk(chunkId?: string): Promise<number>;
 /**
  * Finalizes the current recording chunk and returns it.
  *
@@ -190,14 +196,14 @@ export declare function flushChunk(chunkId?: string): void;
  * @returns Promise resolving to the finalized chunk file
  * @example
  * ```typescript
- * markChunkStart();
+ * await markChunkStart();
  * // ... user does something important ...
  * const chunk1 = await finalizeChunk();
  * await uploadToServer(chunk1);
  *
  * // On Android, call markChunkStart() again to start next chunk
  * // On iOS, recording continues automatically
- * markChunkStart();
+ * await markChunkStart();
  * const chunk2 = await finalizeChunk();
  * await uploadToServer(chunk2);
  * ```
@@ -237,7 +243,7 @@ export declare function retrieveLastGlobalRecording(): ScreenRecordingFile | und
  * @example
  * ```typescript
  * // Retrieve by specific ID (recommended for interviews)
- * markChunkStart('question-5');
+ * await markChunkStart('question-5');
  * // ... user answers ...
  * const chunk = await finalizeChunk();
  * // Or manually retrieve:

@@ -664,79 +664,83 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
    
    - Parameter chunkId: Optional identifier for this chunk. Used for guaranteed correct retrieval.
    */
-  func markChunkStart(chunkId: String?) throws {
-    // Check both our local flag AND the system's isCaptured state
-    // This handles the case where the app was refreshed during recording
-    guard isGlobalRecordingActive || UIScreen.main.isCaptured else {
-      print("⚠️ markChunkStart called but no active global recording.")
-      return
-    }
-
-    // Store chunkId locally to avoid race conditions when finalizeChunk reads it
-    self.currentChunkId = chunkId
-    let markToken = UUID().uuidString
-
-    // Also store in UserDefaults for the broadcast extension to read
-    guard let appGroupId = try? getAppGroupIdentifier(),
-          let defaults = UserDefaults(suiteName: appGroupId) else {
-      print("⚠️ markChunkStart: Could not access app group")
-      return
-    }
-    
-    if let id = chunkId {
-      defaults.set(id, forKey: "CurrentChunkId")
-    } else {
-      defaults.removeObject(forKey: "CurrentChunkId")
-    }
-    defaults.set(markToken, forKey: "MarkChunkToken")
-    defaults.synchronize()
-
-    // Send notification
-    let notif = "com.nitroscreenrecorder.markChunk" as CFString
-    let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
-    
-    func sendMarkNotification() {
-      CFNotificationCenterPostNotification(darwinCenter, CFNotificationName(notif), nil, nil, true)
-    }
-    
-    sendMarkNotification()
-    print("📍 markChunkStart: Notification sent, token=\(markToken), chunkId=\(chunkId ?? "nil")")
-    
-    // Poll for ack (non-blocking, short window)
-    // Extension writes LastProcessedMarkToken after processing
-    var acked = false
-    for attempt in 1...5 {
-      // Brief sleep to allow extension to process
-      Thread.sleep(forTimeInterval: 0.02)  // 20ms per attempt = 100ms max
-      defaults.synchronize()  // Force read
-      if let processedToken = defaults.string(forKey: "LastProcessedMarkToken"),
-         processedToken == markToken {
-        acked = true
-        print("📍 markChunkStart: Acked by extension (attempt \(attempt))")
-        break
+  func markChunkStart(chunkId: String?) throws -> Promise<Double> {
+    return Promise.async {
+      let startTime = Date()
+      
+      // Check both our local flag AND the system's isCaptured state
+      let isScreenCaptured = await MainActor.run { UIScreen.main.isCaptured }
+      guard self.isGlobalRecordingActive || isScreenCaptured else {
+        print("⚠️ markChunkStart called but no active global recording.")
+        return 0
       }
-    }
-    
-    if !acked {
+
+      // Store chunkId locally to avoid race conditions when finalizeChunk reads it
+      self.currentChunkId = chunkId
+      let markToken = UUID().uuidString
+
+      // Also store in UserDefaults for the broadcast extension to read
+      guard let appGroupId = try? self.getAppGroupIdentifier(),
+            let defaults = UserDefaults(suiteName: appGroupId) else {
+        print("⚠️ markChunkStart: Could not access app group")
+        throw RecorderError.error(name: "MARK_CHUNK_FAILED", message: "Could not access app group")
+      }
+      
+      if let id = chunkId {
+        defaults.set(id, forKey: "CurrentChunkId")
+      } else {
+        defaults.removeObject(forKey: "CurrentChunkId")
+      }
+      defaults.set(markToken, forKey: "MarkChunkToken")
+      defaults.synchronize()
+
+      // Send notification
+      let notif = "com.nitroscreenrecorder.markChunk" as CFString
+      let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
+      
+      func sendMarkNotification() {
+        CFNotificationCenterPostNotification(darwinCenter, CFNotificationName(notif), nil, nil, true)
+      }
+      
+      sendMarkNotification()
+      print("📍 markChunkStart: Notification sent, token=\(markToken), chunkId=\(chunkId ?? "nil")")
+      
+      // Poll for ack with async sleep
+      // Extension writes LastProcessedMarkToken after processing
+      var acked = false
+      for attempt in 1...10 {
+        // Brief async sleep to allow extension to process
+        try? await Task.sleep(nanoseconds: 20_000_000)  // 20ms per attempt = 200ms max
+        defaults.synchronize()  // Force read
+        if let processedToken = defaults.string(forKey: "LastProcessedMarkToken"),
+           processedToken == markToken {
+          acked = true
+          let elapsedMs = Date().timeIntervalSince(startTime) * 1000
+          print("📍 markChunkStart: Acked by extension (attempt \(attempt), \(Int(elapsedMs))ms)")
+          return elapsedMs
+        }
+      }
+      
       // Retry once
-      print("⚠️ markChunkStart: No ack, retrying notification...")
+      print("⚠️ markChunkStart: No ack after 200ms, retrying notification...")
       sendMarkNotification()
       
       // Poll again briefly
-      for attempt in 1...5 {
-        Thread.sleep(forTimeInterval: 0.02)
+      for attempt in 1...10 {
+        try? await Task.sleep(nanoseconds: 20_000_000)
         defaults.synchronize()
         if let processedToken = defaults.string(forKey: "LastProcessedMarkToken"),
            processedToken == markToken {
           acked = true
-          print("📍 markChunkStart: Acked on retry (attempt \(attempt))")
-          break
+          let elapsedMs = Date().timeIntervalSince(startTime) * 1000
+          print("📍 markChunkStart: Acked on retry (attempt \(attempt), \(Int(elapsedMs))ms)")
+          return elapsedMs
         }
       }
       
-      if !acked {
-        print("⚠️ markChunkStart: Still no ack after retry - mark may have been missed")
-      }
+      let elapsedMs = Date().timeIntervalSince(startTime) * 1000
+      print("❌ markChunkStart: Still no ack after \(Int(elapsedMs))ms - mark failed")
+      throw RecorderError.error(name: "MARK_CHUNK_FAILED", message: "Extension did not acknowledge mark after \(Int(elapsedMs))ms")
     }
   }
 
