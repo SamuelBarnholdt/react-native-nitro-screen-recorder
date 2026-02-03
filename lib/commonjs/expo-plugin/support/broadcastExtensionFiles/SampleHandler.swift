@@ -149,7 +149,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
   private var isCapturing = false
   private var chunkStartedAt: Double = 0
 
-  // MARK: - Audio Session Interruption Handling (Issue 1)
+  // MARK: - Audio Session Interruption Handling
   private var interruptionObserver: NSObjectProtocol?
   private var routeChangeObserver: NSObjectProtocol?
   private var isAudioInterrupted: Bool = false
@@ -185,9 +185,6 @@ final class SampleHandler: RPBroadcastSampleHandler {
     fileManager.removeFileIfExists(url: audioNodeURL)
     fileManager.removeFileIfExists(url: appAudioNodeURL)
     super.init()
-
-    // DEBUG: Print to system console (doesn't depend on App Group)
-    print("🏁 [BroadcastExtension] SampleHandler init() - extension is being loaded!")
   }
 
   deinit {
@@ -200,7 +197,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
     CFNotificationCenterRemoveObserver(
       center, observer, SampleHandler.finalizeChunkNotificationName, nil)
 
-    // Clean up audio session observers (Issue 1)
+    // Clean up audio session observers
     if let observer = interruptionObserver {
       NotificationCenter.default.removeObserver(observer)
     }
@@ -262,10 +259,6 @@ final class SampleHandler: RPBroadcastSampleHandler {
 
   // MARK: – Broadcast lifecycle
   override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
-    // DEBUG: Print to system console FIRST (doesn't depend on App Group)
-    print("🚀 [BroadcastExtension] broadcastStarted called!")
-    print("🚀 [BroadcastExtension] hostAppGroupIdentifier = \(hostAppGroupIdentifier ?? "NIL")")
-
     startListeningForNotifications()
 
     // Mark broadcast as active
@@ -289,7 +282,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
         "broadcastStarted: Failed to configure audio session: \(error.localizedDescription)")
     }
 
-    // Setup audio session interruption observers (Issue 1)
+    // Setup audio session interruption observers
     setupAudioSessionObservers()
 
     guard let groupID = hostAppGroupIdentifier else {
@@ -333,7 +326,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
     }
   }
 
-  // MARK: - Audio Session Interruption Handling (Issue 1)
+  // MARK: - Audio Session Interruption Handling
 
   private func setupAudioSessionObservers() {
     let nc = NotificationCenter.default
@@ -463,36 +456,10 @@ final class SampleHandler: RPBroadcastSampleHandler {
   private var lastVideoFrameTime: Date?
   private var totalVideoFrames: Int = 0
 
-  // Debug: track first buffer received for each type
-  private var receivedFirstVideo = false
-  private var receivedFirstMic = false
-  private var receivedFirstAppAudio = false
-
   override func processSampleBuffer(
     _ sampleBuffer: CMSampleBuffer,
     with sampleBufferType: RPSampleBufferType
   ) {
-    // DEBUG: Log first buffer of each type (doesn't depend on App Group)
-    switch sampleBufferType {
-    case .video:
-      if !receivedFirstVideo {
-        receivedFirstVideo = true
-        print("🎬 [BroadcastExtension] First VIDEO buffer received!")
-      }
-    case .audioMic:
-      if !receivedFirstMic {
-        receivedFirstMic = true
-        print("🎤 [BroadcastExtension] First MIC buffer received!")
-      }
-    case .audioApp:
-      if !receivedFirstAppAudio {
-        receivedFirstAppAudio = true
-        print("🔊 [BroadcastExtension] First APP AUDIO buffer received!")
-      }
-    @unknown default:
-      break
-    }
-
     // Use sync to ensure thread safety with writer swaps
     writerQueue.sync {
       guard let writer = self.writer else {
@@ -535,7 +502,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
           self.frameCount = 0
           self.updateExtensionStatus()
 
-          // Issue 4: Periodic check for writer failure
+          // Periodic check for writer failure
           if writer.hasFailed {
             self.logError("Writer has FAILED: \(writer.failureError?.localizedDescription ?? "unknown")")
           }

@@ -161,32 +161,32 @@ public final class BroadcastWriter {
   private var detectedAppAudioChannels: Int = 0
   private var appAudioDownmixWarningLogged: Bool = false
 
-  // MARK: - Audio Interruption Handling (Issue 1)
+  // MARK: - Audio Interruption Handling
   private var isAudioPaused: Bool = false
   private var audioInterruptionCount: Int = 0
   private var audioResumeCount: Int = 0
   private var totalInterruptionDuration: TimeInterval = 0
   private var lastInterruptionTime: Date?
 
-  // MARK: - Sample Rate Tracking (Issue 2)
+  // MARK: - Sample Rate Tracking
   private var configuredSampleRate: Double = 0
   private var sampleRateMismatchDetected: Bool = false
   private var sampleRateMismatchCount: Int = 0
   private var maxSampleRateDrift: Double = 0
 
-  // MARK: - Format Validation Tracking (Issue 3)
+  // MARK: - Format Validation Tracking
   private var lastMicFormatDescription: CMFormatDescription?
   private var lastAppAudioFormatDescription: CMFormatDescription?
   private var micFormatChangeCount: Int = 0
   private var appAudioFormatChangeCount: Int = 0
 
-  // MARK: - Writer Failure Detection (Issue 4)
+  // MARK: - Writer Failure Detection
   private var writerFailureDetected: Bool = false
   private var writerFailureTime: Date?
   private var writerFailureError: Swift.Error?
   private var samplesDroppedAfterFailure: Int = 0
 
-  // MARK: - CMTime Precision Tracking (Issue 5)
+  // MARK: - CMTime Precision Tracking
   private var maxTimescaleMismatch: Int32 = 0
   private lazy var defaultAudioFormatDescription: CMFormatDescription? = {
     let fallbackSampleRate = audioSampleRate > 0 ? audioSampleRate : 48_000
@@ -777,27 +777,27 @@ public final class BroadcastWriter {
       metrics["sessionStarted"] = assetWriterSessionStarted
       metrics["audioSessionChangeCount"] = audioSessionChangeCount
 
-      // Issue 1: Audio Interruption metrics
+      // Audio Interruption metrics
       metrics["audioInterruptionCount"] = audioInterruptionCount
       metrics["audioResumeCount"] = audioResumeCount
       metrics["totalInterruptionDuration"] = totalInterruptionDuration
       metrics["isAudioPaused"] = isAudioPaused
 
-      // Issue 2: Sample Rate mismatch metrics
+      // Sample Rate mismatch metrics
       metrics["configuredSampleRate"] = configuredSampleRate
       metrics["sampleRateMismatchDetected"] = sampleRateMismatchDetected
       metrics["sampleRateMismatchCount"] = sampleRateMismatchCount
       metrics["maxSampleRateDrift"] = maxSampleRateDrift
 
-      // Issue 3: Format change metrics
+      // Format change metrics
       metrics["micFormatChangeCount"] = micFormatChangeCount
       metrics["appAudioFormatChangeCount"] = appAudioFormatChangeCount
 
-      // Issue 4: Writer failure metrics
+      // Writer failure metrics
       metrics["writerFailureDetected"] = writerFailureDetected
       metrics["samplesDroppedAfterFailure"] = samplesDroppedAfterFailure
 
-      // Issue 5: CMTime precision metrics
+      // CMTime precision metrics
       metrics["maxTimescaleMismatch"] = maxTimescaleMismatch
 
       #if os(iOS)
@@ -1166,13 +1166,13 @@ extension BroadcastWriter {
   }
 
   fileprivate func captureMicrophoneOutput(_ sampleBuffer: CMSampleBuffer) -> Bool {
-    // Issue 1: Skip audio during pause
+    // Skip audio during pause (interruption handling)
     if isAudioPaused { return false }
 
-    // Issue 2: Validate sample rate
+    // Validate sample rate for mismatch detection
     validateIncomingSampleRate(sampleBuffer, label: "mic")
 
-    // Issue 3: Validate and track format changes
+    // Validate and track format changes
     if !validateAndTrackFormat(sampleBuffer, lastFormat: &lastMicFormatDescription,
                                changeCount: &micFormatChangeCount, label: "Mic") {
       return false
@@ -1301,7 +1301,7 @@ extension BroadcastWriter {
   }
 
   fileprivate func captureAppAudioOutput(_ sampleBuffer: CMSampleBuffer) -> Bool {
-    // Issue 1: Skip audio during pause
+    // Skip audio during pause (interruption handling)
     if isAudioPaused { return false }
 
     guard separateAudioFile, let appWriter = appAudioWriter else {
@@ -1314,10 +1314,10 @@ extension BroadcastWriter {
       return false
     }
 
-    // Issue 2: Validate sample rate
+    // Validate sample rate for mismatch detection
     validateIncomingSampleRate(sampleBuffer, label: "appAudio")
 
-    // Issue 3: Validate and track format changes
+    // Validate and track format changes
     if !validateAndTrackFormat(sampleBuffer, lastFormat: &lastAppAudioFormatDescription,
                                changeCount: &appAudioFormatChangeCount, label: "AppAudio") {
       return false
@@ -1515,7 +1515,7 @@ extension BroadcastWriter {
     let samplesPerChunk = 1024
     let totalSamplesNeeded = samplesRemaining
 
-    // Convert start time to the target timescale for absolute time calculation (Issue 5)
+    // Convert start time to the target timescale for absolute time calculation
     let startTimeInTargetScale = CMTimeConvertScale(startTime, timescale: timeScale, method: .roundHalfAwayFromZero)
 
     // Track timescale mismatch for diagnostics
@@ -1563,7 +1563,7 @@ extension BroadcastWriter {
         break
       }
 
-      // Issue 5: Use absolute time calculation to avoid cumulative rounding errors
+      // Use absolute time calculation to avoid cumulative rounding errors
       let samplesWritten = totalSamplesNeeded - samplesRemaining
       let currentTime = CMTime(value: startTimeInTargetScale.value + CMTimeValue(samplesWritten), timescale: timeScale)
 
@@ -2088,7 +2088,7 @@ extension BroadcastWriter {
     return true
   }
 
-  // MARK: - Issue 2: Sample Rate Validation
+  // MARK: - Sample Rate Validation
 
   /// Validates incoming sample rate against configured rate and logs mismatches
   fileprivate func validateIncomingSampleRate(_ sampleBuffer: CMSampleBuffer, label: String) {
@@ -2107,7 +2107,7 @@ extension BroadcastWriter {
     }
   }
 
-  // MARK: - Issue 3: Format Change Tracking
+  // MARK: - Format Change Tracking
 
   /// Validates and tracks format changes, logging when format differs from previous
   fileprivate func validateAndTrackFormat(
