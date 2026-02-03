@@ -604,6 +604,8 @@ final class SampleHandler: RPBroadcastSampleHandler {
   // We track ARRIVAL time (before sync) to properly debounce even when lock contention delays processing
   private var lastMarkChunkArrivalTime: TimeInterval = 0
   private var lastFinalizeChunkArrivalTime: TimeInterval = 0
+  private var lastMarkChunkToken: String? = nil
+  private var lastFinalizeChunkToken: String? = nil
   private let debounceThreshold: TimeInterval = 0.15  // 150ms debounce (accounts for 50ms notification delay + margin)
 
   private func handleMarkChunk() {
@@ -613,6 +615,18 @@ final class SampleHandler: RPBroadcastSampleHandler {
     let markStartTime = Date()
 
     writerQueue.sync {
+      // Token-based dedupe: ignore if this notification has the same token as last time
+      if let groupID = hostAppGroupIdentifier,
+         let token = UserDefaults(suiteName: groupID)?.string(forKey: "MarkChunkToken")
+      {
+        if token == self.lastMarkChunkToken {
+          self.logDebug("handleMarkChunk: Ignoring duplicate token \(token)")
+          return
+        }
+        self.lastMarkChunkToken = token
+        self.logDebug("handleMarkChunk: Processing token \(token)")
+      }
+
       // Debounce: ignore if this notification arrived within threshold of the last one
       if arrivalTime - self.lastMarkChunkArrivalTime < self.debounceThreshold {
         self.logDebug(
@@ -678,6 +692,18 @@ final class SampleHandler: RPBroadcastSampleHandler {
     let finalizeStartTime = Date()
 
     writerQueue.sync {
+      // Token-based dedupe: ignore if this notification has the same token as last time
+      if let groupID = hostAppGroupIdentifier,
+         let token = UserDefaults(suiteName: groupID)?.string(forKey: "FinalizeChunkToken")
+      {
+        if token == self.lastFinalizeChunkToken {
+          self.logDebug("handleFinalizeChunk: Ignoring duplicate token \(token)")
+          return
+        }
+        self.lastFinalizeChunkToken = token
+        self.logDebug("handleFinalizeChunk: Processing token \(token)")
+      }
+
       // Debounce: ignore if this notification arrived within threshold of the last one
       if arrivalTime - self.lastFinalizeChunkArrivalTime < self.debounceThreshold {
         self.logDebug(
@@ -695,6 +721,14 @@ final class SampleHandler: RPBroadcastSampleHandler {
         return
       }
       self.lastFinalizeChunkArrivalTime = arrivalTime
+
+      // Capture chunkId if markChunkStart wasn't called (uses app-provided CurrentChunkId)
+      if self.pendingChunkId == nil, let groupID = hostAppGroupIdentifier {
+        self.pendingChunkId = UserDefaults(suiteName: groupID)?.string(forKey: "CurrentChunkId")
+        if let chunkId = self.pendingChunkId {
+          self.logInfo("handleFinalizeChunk: Captured chunkId from defaults=\(chunkId)")
+        }
+      }
 
       self.logInfo(
         "handleFinalizeChunk: Saving current chunk, chunkId=\(self.pendingChunkId ?? "nil"), frames=\(self.videoFramesThisWriter)"
@@ -805,6 +839,9 @@ final class SampleHandler: RPBroadcastSampleHandler {
 
       // Save the chunk to shared container
       self.saveChunkToContainer(result: result)
+
+      // Clear pendingChunkId so next chunk doesn't reuse it
+      self.pendingChunkId = nil
 
       // Create new writer with fresh file URLs
       self.createNewWriter()

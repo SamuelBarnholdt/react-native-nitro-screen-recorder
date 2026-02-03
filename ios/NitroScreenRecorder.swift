@@ -674,6 +674,7 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
 
     // Store chunkId locally to avoid race conditions when finalizeChunk reads it
     self.currentChunkId = chunkId
+    let markToken = UUID().uuidString
 
     // Also store in UserDefaults for the broadcast extension to read
     if let appGroupId = try? getAppGroupIdentifier() {
@@ -683,17 +684,15 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
       } else {
         defaults?.removeObject(forKey: "CurrentChunkId")
       }
+      defaults?.set(markToken, forKey: "MarkChunkToken")
       defaults?.synchronize()
     }
 
-    // Send notification twice for reliability (Darwin notifications can be dropped)
+    // Send notification once (token-based dedupe + retry handles reliability)
     let notif = "com.nitroscreenrecorder.markChunk" as CFString
     let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
     CFNotificationCenterPostNotification(darwinCenter, CFNotificationName(notif), nil, nil, true)
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-      CFNotificationCenterPostNotification(darwinCenter, CFNotificationName(notif), nil, nil, true)
-    }
-    print("📍 markChunkStart: Notification sent to broadcast extension, chunkId=\(chunkId ?? "nil")")
+    print("📍 markChunkStart: Notification sent to broadcast extension, chunkId=\(chunkId ?? "nil"), token=\(markToken)")
   }
 
   /**
@@ -723,7 +722,23 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
 
       // Capture the chunkId NOW from local storage (not UserDefaults)
       // This prevents race condition if markChunkStart is called again before retrieve
-      let chunkIdToRetrieve = self.currentChunkId
+      var chunkIdToRetrieve = self.currentChunkId
+      let finalizeToken = UUID().uuidString
+      if let appGroupId = try? self.getAppGroupIdentifier() {
+        let defaults = UserDefaults(suiteName: appGroupId)
+        defaults?.set(finalizeToken, forKey: "FinalizeChunkToken")
+        if chunkIdToRetrieve == nil {
+          let autoId = UUID().uuidString
+          chunkIdToRetrieve = autoId
+          self.currentChunkId = autoId
+          defaults?.set(autoId, forKey: "CurrentChunkId")
+        }
+        defaults?.synchronize()
+      } else if chunkIdToRetrieve == nil {
+        let autoId = UUID().uuidString
+        chunkIdToRetrieve = autoId
+        self.currentChunkId = autoId
+      }
 
       // Setup listener for chunkSaved notification BEFORE sending finalizeChunk
       let center = CFNotificationCenterGetDarwinNotifyCenter()
@@ -746,14 +761,15 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
         .deliverImmediately
       )
 
-      // Send finalizeChunk notification to extension (send twice for reliability)
-      let notif = "com.nitroscreenrecorder.finalizeChunk" as CFString
-      let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
-      CFNotificationCenterPostNotification(darwinCenter, CFNotificationName(notif), nil, nil, true)
-      // Small delay then send again to increase delivery reliability
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+      func sendFinalizeNotification() {
+        let notif = "com.nitroscreenrecorder.finalizeChunk" as CFString
+        let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
         CFNotificationCenterPostNotification(darwinCenter, CFNotificationName(notif), nil, nil, true)
       }
+
+      // Send finalizeChunk notification to extension (single send)
+      sendFinalizeNotification()
+      print("📍 finalizeChunk: Notification sent to broadcast extension, chunkId=\(chunkIdToRetrieve ?? "nil"), token=\(finalizeToken)")
 
       // Wait for chunkSaved signal OR timeout - then fall back to polling
       // Wait 500ms for notification, then poll aggressively
@@ -800,6 +816,23 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
         }
 
         print("❌ All polling attempts returned nil")
+
+        // Retry once in case the notification was dropped
+        print("⚠️ Retrying finalizeChunk notification once...")
+        sendFinalizeNotification()
+
+        // Poll again (shorter retry window)
+        for attempt in 1...10 {
+          print("⚠️ Retry polling attempt \(attempt)/10...")
+          try? await Task.sleep(nanoseconds: 200_000_000)  // 200ms
+
+          if let file = try self.retrieveGlobalRecording(chunkId: chunkIdToRetrieve) {
+            print("✅ Retry polling attempt \(attempt) succeeded")
+            return file
+          }
+        }
+
+        print("❌ Retry polling attempts also returned nil")
         return nil
       } catch {
         print("❌ retrieveGlobalRecording failed after finalizeChunk:", error)
