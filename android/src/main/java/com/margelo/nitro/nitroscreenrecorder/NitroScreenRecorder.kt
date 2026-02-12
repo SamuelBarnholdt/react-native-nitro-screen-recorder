@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
+import android.media.projection.MediaProjectionConfig
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -309,7 +310,14 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
     Promise.async {
       val ctx = NitroModules.applicationContext ?: throw Error("NO_CONTEXT")
       val activity = ctx.currentActivity ?: throw Error("NO_ACTIVITY")
-      val intent = mediaProjectionManager.createScreenCaptureIntent()
+      val intent =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+          mediaProjectionManager.createScreenCaptureIntent(
+            MediaProjectionConfig.createConfigForDefaultDisplay()
+          )
+        } else {
+          mediaProjectionManager.createScreenCaptureIntent()
+        }
 
       suspendCancellableCoroutine<Pair<Int, Intent>> { cont ->
         globalRecordingContinuation = cont
