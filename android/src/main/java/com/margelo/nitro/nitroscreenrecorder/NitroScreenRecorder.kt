@@ -419,53 +419,46 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
 
   override fun stopGlobalRecording(settledTimeMs: Double): Promise<ScreenRecordingFile?> {
     return Promise.async {
-      try {
-        val ctx = NitroModules.applicationContext
-        if (ctx == null) {
-          Log.w(TAG, "No application context")
-          return@async null
-        }
-
-        // Check if we have an active session (MediaProjection exists)
-        val service = globalRecordingService
-        val hasActiveSession = service?.hasActiveSession() == true
-        val serviceRunning = isServiceRunning(ctx)
-        
-        if (!hasActiveSession && !serviceRunning) {
-          Log.w(TAG, "No active recording session to stop")
-          return@async null
-        }
-        
-        // If service is running but we're not bound, we still send the stop intent
-        // This handles hot reload scenarios where the service is orphaned
-        if (serviceRunning) {
-          Log.d(TAG, "🛑 Stopping recording service (bound: $isServiceBound, hasSession: $hasActiveSession)")
-          
-          val stopIntent = Intent(ctx, ScreenRecordingService::class.java).apply {
-            action = ScreenRecordingService.ACTION_STOP_RECORDING
-          }
-          ctx.startService(stopIntent)
-        }
-
-        if (isServiceBound) {
-          try {
-            ctx.unbindService(serviceConnection)
-          } catch (e: Exception) {
-            Log.w(TAG, "Service already unbound: ${e.message}")
-          }
-          isServiceBound = false
-        }
-        
-        globalRecordingService = null
-
-        delay(settledTimeMs.toLong())
-
-        return@async retrieveLastGlobalRecording()
-      } catch (e: Exception) {
-        Log.e(TAG, "Error stopping global recording: ${e.message}")
-        e.printStackTrace()
-        return@async null
+      val ctx = NitroModules.applicationContext
+      if (ctx == null) {
+        throw Error("NO_CONTEXT")
       }
+
+      // Check if we have an active session (MediaProjection exists)
+      val service = globalRecordingService
+      val hasActiveSession = service?.hasActiveSession() == true
+      val serviceRunning = isServiceRunning(ctx)
+
+      if (!hasActiveSession && !serviceRunning) {
+        throw Error("NO_ACTIVE_RECORDING_SESSION")
+      }
+
+      // If service is running but we're not bound, we still send the stop intent
+      // This handles hot reload scenarios where the service is orphaned
+      if (serviceRunning) {
+        Log.d(TAG, "🛑 Stopping recording service (bound: $isServiceBound, hasSession: $hasActiveSession)")
+
+        val stopIntent = Intent(ctx, ScreenRecordingService::class.java).apply {
+          action = ScreenRecordingService.ACTION_STOP_RECORDING
+        }
+        ctx.startService(stopIntent)
+      }
+
+      if (isServiceBound) {
+        try {
+          ctx.unbindService(serviceConnection)
+        } catch (e: Exception) {
+          Log.w(TAG, "Service already unbound: ${e.message}")
+        }
+        isServiceBound = false
+      }
+
+      globalRecordingService = null
+
+      delay(settledTimeMs.toLong())
+
+      return@async retrieveLastGlobalRecording()
+        ?: throw Error("NO_RECORDING_FILE_AFTER_STOP")
     }
   }
 
@@ -581,15 +574,13 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
       
       val service = globalRecordingService
       if (service == null) {
-        Log.w(TAG, "⚠️ finalizeChunk: Service not bound")
-        return@async null
+        throw Error("NO_ACTIVE_RECORDING_SESSION")
       }
       
       val chunkFile = service.finalizeChunk()
       
       if (chunkFile == null) {
-        Log.w(TAG, "⚠️ finalizeChunk: No chunk file returned")
-        return@async null
+        throw Error("NO_FINALIZED_CHUNK_FILE")
       }
       
       // Wait for file to settle
@@ -638,7 +629,7 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
           appAudioFile = null
         )
       } else {
-        null
+        throw Error("FINALIZED_CHUNK_FILE_MISSING")
       }
     }
   }
