@@ -21,11 +21,67 @@ private const val TAG = "RecorderUtils"
  * A data class to hold screen dimension properties.
  */
 data class ScreenMetrics(val width: Int, val height: Int, val density: Int)
+data class RecordingProfile(
+  val width: Int,
+  val height: Int,
+  val videoBitrate: Int,
+  val frameRate: Int
+)
 
 /**
  * A singleton object containing utility functions for screen recording.
  */
 object RecorderUtils {
+
+  private fun isLikelyEmulator(): Boolean {
+    val fingerprint = Build.FINGERPRINT.lowercase(Locale.ROOT)
+    val model = Build.MODEL.lowercase(Locale.ROOT)
+    val manufacturer = Build.MANUFACTURER.lowercase(Locale.ROOT)
+    val brand = Build.BRAND.lowercase(Locale.ROOT)
+    val device = Build.DEVICE.lowercase(Locale.ROOT)
+    val product = Build.PRODUCT.lowercase(Locale.ROOT)
+
+    return fingerprint.startsWith("generic") ||
+      fingerprint.contains("emulator") ||
+      model.contains("emulator") ||
+      model.contains("sdk_gphone") ||
+      manufacturer.contains("genymotion") ||
+      (brand.startsWith("generic") && device.startsWith("generic")) ||
+      product.contains("sdk")
+  }
+
+  fun buildRecordingProfile(screenWidth: Int, screenHeight: Int): RecordingProfile {
+    if (!isLikelyEmulator()) {
+      return RecordingProfile(
+        width = screenWidth,
+        height = screenHeight,
+        videoBitrate = 8 * 1024 * 1024,
+        frameRate = 30
+      )
+    }
+
+    val maxLongSide = 1280
+    val isLandscape = screenWidth >= screenHeight
+    val longSide = if (isLandscape) screenWidth else screenHeight
+    val shortSide = if (isLandscape) screenHeight else screenWidth
+    val scale = minOf(1.0, maxLongSide.toDouble() / longSide.toDouble())
+
+    var scaledLong = (longSide * scale).toInt()
+    var scaledShort = (shortSide * scale).toInt()
+
+    if (scaledLong % 2 != 0) scaledLong -= 1
+    if (scaledShort % 2 != 0) scaledShort -= 1
+
+    val profileWidth = if (isLandscape) scaledLong else scaledShort
+    val profileHeight = if (isLandscape) scaledShort else scaledLong
+
+    return RecordingProfile(
+      width = profileWidth.coerceAtLeast(2),
+      height = profileHeight.coerceAtLeast(2),
+      videoBitrate = 3 * 1024 * 1024,
+      frameRate = 24
+    )
+  }
 
   /**
    * Initializes and returns the screen metrics (width, height, density).
@@ -152,7 +208,8 @@ object RecorderUtils {
     outputFile: File,
     screenWidth: Int,
     screenHeight: Int,
-    videoBitrate: Int
+    videoBitrate: Int,
+    videoFrameRate: Int
   ): MediaRecorder {
     Log.d(TAG, "🎬 Setting up MediaRecorder: enableMic=$enableMicrophone")
 
@@ -178,7 +235,7 @@ object RecorderUtils {
 
         setOutputFile(outputFile.absolutePath)
         setVideoSize(screenWidth, screenHeight)
-        setVideoFrameRate(30)
+        setVideoFrameRate(videoFrameRate)
         setVideoEncodingBitRate(videoBitrate) // e.g., 2 * 1024 * 1024 for 2 Mbps
 
         if (enableMicrophone) {

@@ -23,6 +23,17 @@ import kotlin.coroutines.resume
 import kotlinx.coroutines.delay
 
 data class Listener<T>(val id: Double, val callback: T)
+data class ScreenRecordingListenerEntry(
+  val id: Double,
+  val ignoreRecordingsInitiatedElsewhere: Boolean,
+  val callback: (ScreenRecordingEvent) -> Unit
+)
+data class CompletedGlobalRecording(
+  val chunkId: String?,
+  val videoFile: File,
+  val audioFile: File?,
+  val enabledMicrophone: Boolean
+)
 
 @DoNotStrip
 class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
@@ -34,10 +45,13 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
   private var isServiceBound = false
   private var lastGlobalRecording: File? = null
   private var lastGlobalAudioRecording: File? = null
+  private var lastGlobalRecordingEnabledMicrophone = false
   private var globalRecordingErrorCallback: ((RecordingError) -> Unit)? = null
+  private var globalRecordingInitiatedByThisPackage = false
+  private var currentChunkId: String? = null
+  private val pendingGlobalRecordings = mutableListOf<CompletedGlobalRecording>()
 
-  private val screenRecordingListeners =
-    mutableListOf<Listener<(ScreenRecordingEvent) -> Unit>>()
+  private val screenRecordingListeners = mutableListOf<ScreenRecordingListenerEntry>()
   private var nextListenerId = 0.0
 
   companion object {
@@ -60,7 +74,12 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
         TAG,
         "🔔 notifyGlobalRecordingEvent called with type: ${event.type}, reason: ${event.reason}"
       )
-      instance?.notifyListeners(event)
+      instance?.let { recorder ->
+        if (event.type == RecordingEventType.GLOBAL && event.reason == RecordingEventReason.ENDED) {
+          recorder.globalRecordingInitiatedByThisPackage = false
+        }
+        recorder.notifyListeners(event)
+      }
     }
 
     fun notifyGlobalRecordingFinished(
@@ -73,6 +92,7 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
       instance?.let { recorder ->
         recorder.lastGlobalRecording = file
         recorder.lastGlobalAudioRecording = audioFile
+        recorder.lastGlobalRecordingEnabledMicrophone = enabledMic
         recorder.notifyListeners(event)
       }
     }
@@ -146,7 +166,13 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
     )
     screenRecordingListeners.forEach { listener ->
       try {
-        listener.callback(event)
+        val isExternalGlobalRecording =
+          event.type == RecordingEventType.GLOBAL && !globalRecordingInitiatedByThisPackage
+        val shouldIgnore =
+          listener.ignoreRecordingsInitiatedElsewhere && isExternalGlobalRecording
+        if (!shouldIgnore) {
+          listener.callback(event)
+        }
       } catch (e: Exception) {
         Log.e(TAG, "❌ Error in screen recording listener ${listener.id}: ${e.message}")
       }
@@ -158,7 +184,8 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
     callback: (ScreenRecordingEvent) -> Unit
   ): Double {
     val id = nextListenerId++
-    screenRecordingListeners += Listener(id, callback)
+    screenRecordingListeners +=
+      ScreenRecordingListenerEntry(id, ignoreRecordingsInitiatedElsewhere, callback)
     Log.d(
       TAG,
       "👂 Added screen recording listener with ID: $id, total listeners: ${screenRecordingListeners.size}"
@@ -351,6 +378,7 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
 
     // Store the error callback so it can be used by the service
     globalRecordingErrorCallback = onRecordingError
+    globalRecordingInitiatedByThisPackage = true
 
     requestGlobalRecordingPermission().then { (resultCode, resultData) ->
       if (!isServiceBound) {
@@ -372,6 +400,7 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
         ctx.startService(startIntent)
       }
     }.catch { error ->
+      globalRecordingInitiatedByThisPackage = false
       val recordingError = RecordingError(
         name = "GlobalRecordingStartError",
         message = error.message ?: "Failed to start global recording"
@@ -454,7 +483,7 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
           name = file.name,
           size = file.length().toDouble(),
           duration = RecorderUtils.getVideoDuration(file),
-          enabledMicrophone = true, // Assume true for global recordings
+          enabledMicrophone = lastGlobalRecordingEnabledMicrophone,
           audioFile = audioFile,
           appAudioFile = null  // App audio capture not supported on Android
         )
@@ -464,6 +493,53 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
     }
   }
 
+  override fun retrieveGlobalRecording(chunkId: String?): ScreenRecordingFile? {
+    if (pendingGlobalRecordings.isEmpty()) {
+      return retrieveLastGlobalRecording()
+    }
+
+    val selectedIndex =
+      if (chunkId != null) {
+        val foundIndex = pendingGlobalRecordings.indexOfFirst { it.chunkId == chunkId }
+        if (foundIndex >= 0) {
+          foundIndex
+        } else {
+          pendingGlobalRecordings.lastIndex
+        }
+      } else {
+        pendingGlobalRecordings.lastIndex
+      }
+
+    val selected = pendingGlobalRecordings.removeAt(selectedIndex)
+    val videoFile = selected.videoFile
+    if (!videoFile.exists()) {
+      return null
+    }
+
+    val audioFileInfo = selected.audioFile?.let { audioFile ->
+      if (audioFile.exists()) {
+        AudioRecordingFile(
+          path = "file://${audioFile.absolutePath}",
+          name = audioFile.name,
+          size = audioFile.length().toDouble(),
+          duration = RecorderUtils.getAudioDuration(audioFile)
+        )
+      } else {
+        null
+      }
+    }
+
+    return ScreenRecordingFile(
+      path = "file://${videoFile.absolutePath}",
+      name = videoFile.name,
+      size = videoFile.length().toDouble(),
+      duration = RecorderUtils.getVideoDuration(videoFile),
+      enabledMicrophone = selected.enabledMicrophone,
+      audioFile = audioFileInfo,
+      appAudioFile = null
+    )
+  }
+
   override fun clearRecordingCache() {
     val ctx = NitroModules.applicationContext ?: return
     // Note: In-app recordings used internal storage. We only clear global now.
@@ -471,6 +547,9 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
     RecorderUtils.clearDirectory(globalDir)
     lastGlobalRecording = null
     lastGlobalAudioRecording = null
+    lastGlobalRecordingEnabledMicrophone = false
+    currentChunkId = null
+    pendingGlobalRecordings.clear()
   }
 
   // --- Chunking ---
@@ -479,6 +558,7 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
     return Promise.async {
       Log.d(TAG, "📍 markChunkStart called with chunkId=$chunkId")
       val startTime = System.currentTimeMillis()
+      currentChunkId = chunkId
       globalRecordingService?.markChunkStart() ?: run {
         Log.w(TAG, "⚠️ markChunkStart: Service not bound")
       }
@@ -509,10 +589,20 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
       
       // Store as last recording for retrieval
       lastGlobalRecording = chunkFile
+      lastGlobalRecordingEnabledMicrophone = service.isMicrophoneEnabled()
       
       // Get audio file if extracted
       val audioFile = service.getLastAudioFile()
       lastGlobalAudioRecording = audioFile
+      pendingGlobalRecordings.add(
+        CompletedGlobalRecording(
+          chunkId = currentChunkId,
+          videoFile = chunkFile,
+          audioFile = audioFile,
+          enabledMicrophone = service.isMicrophoneEnabled()
+        )
+      )
+      currentChunkId = null
       
       // Build audio file info if available
       val audioFileInfo = audioFile?.let { af ->
@@ -582,5 +672,21 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
     }
     
     return serviceRunning
+  }
+
+  override fun getExtensionLogs(): Array<String> {
+    return emptyArray()
+  }
+
+  override fun clearExtensionLogs() {
+    return
+  }
+
+  override fun getExtensionAudioMetrics(): String {
+    return "{\"metrics\": [], \"platform\": \"android\"}"
+  }
+
+  override fun clearExtensionAudioMetrics() {
+    return
   }
 }

@@ -18,6 +18,7 @@ import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import com.margelo.nitro.nitroscreenrecorder.utils.RecorderUtils
+import com.margelo.nitro.nitroscreenrecorder.utils.RecordingProfile
 import java.io.File
 
 class ScreenRecordingService : Service() {
@@ -48,6 +49,7 @@ class ScreenRecordingService : Service() {
   private var screenWidth = 0
   private var screenHeight = 0
   private var screenDensity = 0
+  private var recordingProfile = RecordingProfile(0, 0, 8 * 1024 * 1024, 30)
   private var startId: Int = -1
   private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -124,6 +126,7 @@ class ScreenRecordingService : Service() {
     screenWidth = metrics.width
     screenHeight = metrics.height
     screenDensity = metrics.density
+    recordingProfile = RecorderUtils.buildRecordingProfile(screenWidth, screenHeight)
     Log.d(TAG, "✅ ScreenRecordingService created successfully")
   }
 
@@ -281,16 +284,17 @@ class ScreenRecordingService : Service() {
         this,
         enableMicrophone,
         currentRecordingFile!!,
-        screenWidth,
-        screenHeight,
-        8 * 1024 * 1024
-      ) // 8 Mbps
+        recordingProfile.width,
+        recordingProfile.height,
+        recordingProfile.videoBitrate,
+        recordingProfile.frameRate
+      )
       mediaRecorder?.prepare()
 
       virtualDisplay = mediaProjection?.createVirtualDisplay(
         "GlobalScreenRecording",
-        screenWidth,
-        screenHeight,
+        recordingProfile.width,
+        recordingProfile.height,
         screenDensity,
         DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
         mediaRecorder?.surface,
@@ -450,9 +454,10 @@ class ScreenRecordingService : Service() {
         this,
         enableMic,
         newRecordingFile,
-        screenWidth,
-        screenHeight,
-        8 * 1024 * 1024
+        recordingProfile.width,
+        recordingProfile.height,
+        recordingProfile.videoBitrate,
+        recordingProfile.frameRate
       )
       newRecorder.prepare()
 

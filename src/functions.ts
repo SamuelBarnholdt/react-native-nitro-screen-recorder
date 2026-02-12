@@ -527,11 +527,6 @@ export function getExtensionStatus(): RawExtensionStatus {
  * ```
  */
 export function isScreenBeingRecorded(): boolean {
-  if (Platform.OS === 'android') {
-    // Android doesn't have a direct equivalent, return false
-    // The event listener is the reliable source on Android
-    return false;
-  }
   return NitroScreenRecorderHybridObject.isScreenBeingRecorded();
 }
 
