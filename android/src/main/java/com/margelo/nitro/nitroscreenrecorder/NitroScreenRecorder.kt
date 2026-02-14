@@ -427,6 +427,8 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
       // Check if we have an active session (MediaProjection exists)
       val service = globalRecordingService
       val hasActiveSession = service?.hasActiveSession() == true
+      val enabledMic = service?.isMicrophoneEnabled() == true
+      val separateAudio = service?.isSeparateAudioEnabled() == true
       val serviceRunning = isServiceRunning(ctx)
 
       if (!hasActiveSession && !serviceRunning) {
@@ -456,6 +458,25 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
       globalRecordingService = null
 
       delay(settledTimeMs.toLong())
+
+      // Post-process the raw recording file (optimize + extract audio)
+      val rawFile = lastGlobalRecording
+      if (rawFile != null && rawFile.exists()) {
+        val optimized = RecorderUtils.optimizeForStreaming(rawFile)
+        lastGlobalRecording = optimized
+
+        if (separateAudio && enabledMic) {
+          val base = ctx.externalCacheDir ?: ctx.filesDir
+          val recordingsDir = File(base, "recordings")
+          val audioOutputFile = RecorderUtils.createAudioOutputFile(recordingsDir, "global_recording_audio")
+          val extracted = RecorderUtils.extractAudioFromVideo(optimized, audioOutputFile)
+          if (extracted) {
+            lastGlobalAudioRecording = audioOutputFile
+          } else {
+            audioOutputFile.delete()
+          }
+        }
+      }
 
       return@async retrieveLastGlobalRecording()
         ?: throw Error("NO_RECORDING_FILE_AFTER_STOP")
@@ -577,22 +598,44 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
         throw Error("NO_ACTIVE_RECORDING_SESSION")
       }
       
-      val chunkFile = service.finalizeChunk()
+      var chunkFile = service.finalizeChunk()
       
       if (chunkFile == null) {
         throw Error("NO_FINALIZED_CHUNK_FILE")
       }
+
+      if (!chunkFile.exists()) {
+        throw Error("FINALIZED_CHUNK_FILE_MISSING")
+      }
       
-      // Wait for file to settle
-      delay(settledTimeMs.toLong())
-      
+      // Optimize MP4 for streaming (moves moov atom to front)
+      chunkFile = RecorderUtils.optimizeForStreaming(chunkFile)
+
+      // Extract audio to separate file if requested and mic was enabled
+      var audioFile: File? = null
+      if (service.isSeparateAudioEnabled() && service.isMicrophoneEnabled()) {
+        val base = NitroModules.applicationContext?.externalCacheDir
+          ?: NitroModules.applicationContext?.filesDir
+        if (base != null) {
+          val recordingsDir = File(base, "recordings")
+          val audioOutputFile = RecorderUtils.createAudioOutputFile(recordingsDir, "chunk_audio")
+          val extracted = RecorderUtils.extractAudioFromVideo(chunkFile, audioOutputFile)
+          if (extracted) {
+            audioFile = audioOutputFile
+          } else {
+            audioOutputFile.delete()
+          }
+        }
+      }
+
+      // Read durations with a single MediaMetadataRetriever for the video file
+      val videoDuration = RecorderUtils.getVideoDuration(chunkFile)
+
       // Store as last recording for retrieval
       lastGlobalRecording = chunkFile
       lastGlobalRecordingEnabledMicrophone = service.isMicrophoneEnabled()
-      
-      // Get audio file if extracted
-      val audioFile = service.getLastAudioFile()
       lastGlobalAudioRecording = audioFile
+
       pendingGlobalRecordings.add(
         CompletedGlobalRecording(
           chunkId = currentChunkId,
@@ -617,20 +660,15 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
         }
       }
       
-      // Return the chunk file with audio if available
-      return@async if (chunkFile.exists()) {
-        ScreenRecordingFile(
-          path = "file://${chunkFile.absolutePath}",
-          name = chunkFile.name,
-          size = chunkFile.length().toDouble(),
-          duration = RecorderUtils.getVideoDuration(chunkFile),
-          enabledMicrophone = service.isMicrophoneEnabled(),
-          audioFile = audioFileInfo,
-          appAudioFile = null
-        )
-      } else {
-        throw Error("FINALIZED_CHUNK_FILE_MISSING")
-      }
+      return@async ScreenRecordingFile(
+        path = "file://${chunkFile.absolutePath}",
+        name = chunkFile.name,
+        size = chunkFile.length().toDouble(),
+        duration = videoDuration,
+        enabledMicrophone = service.isMicrophoneEnabled(),
+        audioFile = audioFileInfo,
+        appAudioFile = null
+      )
     }
   }
 
