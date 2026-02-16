@@ -15,6 +15,85 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 
+type RuntimeMetrics = {
+  fps: number;
+  jsThreadMs: number;
+  memoryMb: number;
+  pollCostMs: number;
+};
+
+function useRuntimeMonitor(enabled: boolean): RuntimeMetrics {
+  const [metrics, setMetrics] = useState<RuntimeMetrics>({
+    fps: 0,
+    jsThreadMs: 0,
+    memoryMb: 0,
+    pollCostMs: 0,
+  });
+  const frameTimesRef = useRef<number[]>([]);
+  const rafIdRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!enabled) {
+      if (rafIdRef.current != null) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+      frameTimesRef.current = [];
+      return;
+    }
+
+    const countFrame = () => {
+      frameTimesRef.current.push(performance.now());
+      rafIdRef.current = requestAnimationFrame(countFrame);
+    };
+    rafIdRef.current = requestAnimationFrame(countFrame);
+
+    const interval = setInterval(() => {
+      const now = performance.now();
+      const recent = frameTimesRef.current.filter((t) => now - t < 1000);
+      frameTimesRef.current = recent;
+      const fps = recent.length;
+
+      // Measure JS thread responsiveness (how long a sync task takes to execute)
+      const jsStart = performance.now();
+      // Small busywork to measure JS thread availability
+      let _sum = 0;
+      for (let i = 0; i < 1000; i++) _sum += i;
+      void _sum;
+      const jsThreadMs = Math.round((performance.now() - jsStart) * 100) / 100;
+
+      // Measure poll cost
+      const pollStart = performance.now();
+      try {
+        ScreenRecorder.isScreenBeingRecorded();
+        ScreenRecorder.getExtensionStatus();
+      } catch (_e) {
+        // ignore if not recording
+      }
+      const pollCostMs =
+        Math.round((performance.now() - pollStart) * 100) / 100;
+
+      // @ts-expect-error - performance.memory is non-standard but available in some engines
+      const memoryMb = global?.performance?.memory
+        ? // @ts-expect-error
+          Math.round(global.performance.memory.usedJSHeapSize / 1024 / 1024)
+        : 0;
+
+      setMetrics({ fps, jsThreadMs, memoryMb, pollCostMs });
+    }, 1000);
+
+    return () => {
+      clearInterval(interval);
+      if (rafIdRef.current != null) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+    };
+  }, [enabled]);
+
+  return metrics;
+}
+
 const MIC_FAILURE_DELAY_MS = 1500; // Wait 1.5s before marking mic failure
 const THERMAL_STRESS_CHUNK_MS = 150;
 const THERMAL_STRESS_PAUSE_MS = 1;
@@ -77,6 +156,11 @@ export default function App() {
   const [isChunkingActive, setIsChunkingActive] = useState(false);
   const [selectedChunk, setSelectedChunk] = useState<Chunk | undefined>();
 
+  // Perf timing state
+  const [perfTimings, setPerfTimings] = useState<
+    { label: string; ms: number; timestamp: Date }[]
+  >([]);
+
   // Mic detection gating state
   const [hadMicFailure, setHadMicFailure] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
@@ -104,6 +188,9 @@ export default function App() {
       console.log('📱 Modal dismissed');
     },
   });
+
+  // Runtime performance monitor (always active)
+  const runtimeMetrics = useRuntimeMonitor(true);
 
   // Mic detection gating logic
   const isMicEnabled =
@@ -261,10 +348,19 @@ export default function App() {
   };
 
   const handleStopGlobalRecording = async () => {
+    const t0 = performance.now();
     const file = await ScreenRecorder.stopGlobalRecording();
+    const stopMs = Math.round(performance.now() - t0);
+    const stopLabel = `stopGlobalRecording (${file ? `${(file.size / 1024).toFixed(0)}KB` : 'null'})`;
+    setPerfTimings((prev) =>
+      [{ label: stopLabel, ms: stopMs, timestamp: new Date() }, ...prev].slice(
+        0,
+        20
+      )
+    );
     if (file) {
       setGlobalRecording(file);
-      console.log('✅ Global recording stopped:');
+      console.log(`✅ Global recording stopped (${stopMs}ms):`);
       console.log(`   📹 Video: ${file.path}`);
       console.log(`   📹 Name: ${file.name}`);
       console.log(`   📹 Size: ${(file.size / 1024).toFixed(1)} KB`);
@@ -327,9 +423,17 @@ export default function App() {
       Alert.alert('Not Recording', 'Start a global recording first');
       return;
     }
+    const t0 = performance.now();
     ScreenRecorder.markChunkStart();
+    const ms = Math.round(performance.now() - t0);
+    setPerfTimings((prev) =>
+      [{ label: 'markChunkStart', ms, timestamp: new Date() }, ...prev].slice(
+        0,
+        20
+      )
+    );
     setIsChunkingActive(true);
-    console.log('📍 Chunk start marked');
+    console.log(`📍 Chunk start marked (${ms}ms)`);
     Alert.alert('Chunk Started', 'Recording content from this point...');
   }, [isRecording]);
 
@@ -349,8 +453,14 @@ export default function App() {
     const file = await ScreenRecorder.finalizeChunk(undefined, {
       settledTimeMs: 1000,
     });
-    console.log(
-      `📦 finalizeChunk took ${(performance.now() - t0).toFixed(0)}ms`
+    const finalizeMs = Math.round(performance.now() - t0);
+    console.log(`📦 finalizeChunk took ${finalizeMs}ms`);
+    const chunkLabel = `finalizeChunk (${file ? `${(file.size / 1024).toFixed(0)}KB` : 'null'})`;
+    setPerfTimings((prev) =>
+      [
+        { label: chunkLabel, ms: finalizeMs, timestamp: new Date() },
+        ...prev,
+      ].slice(0, 20)
     );
     logAudioMetricsToConsole('finalize chunk');
 
@@ -1631,7 +1741,7 @@ export default function App() {
       const fileReturned = file !== null;
       const actualDuration = file?.duration ?? 0;
       const fileName = file?.name ?? '';
-      
+
       // Verify chunkId is in the filename (bulletproof verification)
       const chunkIdInFilename = fileName.includes(chunkId);
       const durationMatch =
@@ -1668,9 +1778,7 @@ export default function App() {
         );
       } else if (!chunkIdInFilename) {
         consecutiveFailures++;
-        console.log(
-          `   🚨 ${chunkId} WRONG FILE! Filename: ${fileName}`
-        );
+        console.log(`   🚨 ${chunkId} WRONG FILE! Filename: ${fileName}`);
         console.log(
           `      Expected chunkId "${chunkId}" in filename but not found!`
         );
@@ -1707,7 +1815,9 @@ export default function App() {
 
     const totalTime = ((performance.now() - startTime) / 1000).toFixed(1);
     const fileCount = results.filter((r) => r.fileReturned).length;
-    const filenameMatchCount = results.filter((r) => r.chunkIdInFilename).length;
+    const filenameMatchCount = results.filter(
+      (r) => r.chunkIdInFilename
+    ).length;
     const durationMatchCount = results.filter((r) => r.durationMatch).length;
     const wrongFileCount = results.filter(
       (r) => r.fileReturned && !r.chunkIdInFilename
@@ -1720,7 +1830,9 @@ export default function App() {
     console.log('\n================================================');
     console.log('📊 GAUNTLET RESULTS');
     console.log(`   Files returned: ${fileCount}/${results.length}`);
-    console.log(`   ChunkId in filename: ${filenameMatchCount}/${results.length} ✅`);
+    console.log(
+      `   ChunkId in filename: ${filenameMatchCount}/${results.length} ✅`
+    );
     console.log(`   Duration matches: ${durationMatchCount}/${results.length}`);
     console.log(`   WRONG FILE (filename mismatch): ${wrongFileCount} ❌`);
     console.log(`   Time: ${totalTime}s total`);
@@ -1733,7 +1845,9 @@ export default function App() {
       (r) => r.fileReturned && !r.chunkIdInFilename
     );
     if (wrongFiles.length > 0) {
-      console.log(`\n   🚨 WRONG FILES (filename doesn't contain expected chunkId):`);
+      console.log(
+        `\n   🚨 WRONG FILES (filename doesn't contain expected chunkId):`
+      );
       wrongFiles.forEach((w) => {
         console.log(
           `      ${w.id}: got file "${w.fileName}" (duration ${w.actualDuration.toFixed(1)}s)`
@@ -1962,6 +2076,60 @@ export default function App() {
 
   return (
     <View style={styles.root}>
+      {/* Runtime Monitor Overlay */}
+      <View style={styles.runtimeOverlay}>
+        <View style={styles.runtimeRow}>
+          <Text style={styles.runtimeTitle}>Runtime Monitor</Text>
+          <Text
+            style={[
+              styles.runtimeValue,
+              isRecording ? styles.perfSlow : styles.perfFast,
+            ]}
+          >
+            {isRecording ? 'REC' : 'IDLE'}
+          </Text>
+        </View>
+        <View style={styles.runtimeRow}>
+          <Text style={styles.runtimeLabel}>FPS</Text>
+          <Text
+            style={[
+              styles.runtimeValue,
+              runtimeMetrics.fps < 30 && styles.perfSlow,
+              runtimeMetrics.fps >= 30 &&
+                runtimeMetrics.fps < 50 &&
+                styles.perfWarn,
+              runtimeMetrics.fps >= 50 && styles.perfFast,
+            ]}
+          >
+            {runtimeMetrics.fps}
+          </Text>
+        </View>
+        <View style={styles.runtimeRow}>
+          <Text style={styles.runtimeLabel}>JS thread</Text>
+          <Text style={styles.runtimeValue}>{runtimeMetrics.jsThreadMs}ms</Text>
+        </View>
+        <View style={styles.runtimeRow}>
+          <Text style={styles.runtimeLabel}>Poll cost</Text>
+          <Text
+            style={[
+              styles.runtimeValue,
+              runtimeMetrics.pollCostMs > 5 && styles.perfSlow,
+              runtimeMetrics.pollCostMs > 2 &&
+                runtimeMetrics.pollCostMs <= 5 &&
+                styles.perfWarn,
+              runtimeMetrics.pollCostMs <= 2 && styles.perfFast,
+            ]}
+          >
+            {runtimeMetrics.pollCostMs}ms
+          </Text>
+        </View>
+        {runtimeMetrics.memoryMb > 0 && (
+          <View style={styles.runtimeRow}>
+            <Text style={styles.runtimeLabel}>JS Heap</Text>
+            <Text style={styles.runtimeValue}>{runtimeMetrics.memoryMb}MB</Text>
+          </View>
+        )}
+      </View>
       <ScrollView
         style={styles.container}
         contentContainerStyle={styles.contentContainer}
@@ -2061,6 +2229,36 @@ export default function App() {
               <Text style={styles.chunkButtonSubtext}>Save & get file</Text>
             </TouchableOpacity>
           </View>
+
+          {/* Perf Timings Panel */}
+          {perfTimings.length > 0 && (
+            <View style={styles.perfPanel}>
+              <View style={styles.perfHeader}>
+                <Text style={styles.perfTitle}>Perf Timings</Text>
+                <TouchableOpacity onPress={() => setPerfTimings([])}>
+                  <Text style={styles.perfClear}>Clear</Text>
+                </TouchableOpacity>
+              </View>
+              {perfTimings.map((entry, i) => (
+                <View key={i} style={styles.perfRow}>
+                  <Text style={styles.perfLabel}>{entry.label}</Text>
+                  <Text
+                    style={[
+                      styles.perfValue,
+                      entry.ms > 2000 && styles.perfSlow,
+                      entry.ms > 500 && entry.ms <= 2000 && styles.perfWarn,
+                      entry.ms <= 500 && styles.perfFast,
+                    ]}
+                  >
+                    {entry.ms}ms
+                  </Text>
+                </View>
+              ))}
+              <Text style={styles.perfHint}>
+                Native breakdown: adb logcat -s NitroPerf
+              </Text>
+            </View>
+          )}
 
           {/* Mic Gating Status Banner */}
           {isRecording && (
@@ -3065,5 +3263,100 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '600',
+  },
+  runtimeOverlay: {
+    position: 'absolute',
+    top: 50,
+    right: 8,
+    zIndex: 999,
+    backgroundColor: 'rgba(10, 10, 30, 0.92)',
+    borderRadius: 8,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#333',
+    minWidth: 150,
+  },
+  runtimeTitle: {
+    color: '#8888FF',
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginBottom: 4,
+  },
+  runtimeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 1,
+  },
+  runtimeLabel: {
+    color: '#888',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  runtimeValue: {
+    color: '#CCC',
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginLeft: 12,
+  },
+  perfPanel: {
+    backgroundColor: '#1A1A2E',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#2A2A4E',
+  },
+  perfHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  perfTitle: {
+    color: '#8888FF',
+    fontSize: 13,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  perfClear: {
+    color: '#666',
+    fontSize: 12,
+  },
+  perfRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 3,
+  },
+  perfLabel: {
+    color: '#AAA',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    flex: 1,
+  },
+  perfValue: {
+    fontSize: 13,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    minWidth: 70,
+    textAlign: 'right',
+  },
+  perfSlow: {
+    color: '#FF4444',
+  },
+  perfWarn: {
+    color: '#FFAA00',
+  },
+  perfFast: {
+    color: '#44FF44',
+  },
+  perfHint: {
+    color: '#555',
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginTop: 8,
+    textAlign: 'center',
   },
 });

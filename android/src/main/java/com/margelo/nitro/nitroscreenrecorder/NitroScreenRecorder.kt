@@ -607,11 +607,9 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
       if (!chunkFile.exists()) {
         throw Error("FINALIZED_CHUNK_FILE_MISSING")
       }
-      
-      // Optimize MP4 for streaming (moves moov atom to front)
+
       chunkFile = RecorderUtils.optimizeForStreaming(chunkFile)
 
-      // Extract audio to separate file if requested and mic was enabled
       var audioFile: File? = null
       if (service.isSeparateAudioEnabled() && service.isMicrophoneEnabled()) {
         val base = NitroModules.applicationContext?.externalCacheDir
@@ -628,7 +626,6 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
         }
       }
 
-      // Read durations with a single MediaMetadataRetriever for the video file
       val videoDuration = RecorderUtils.getVideoDuration(chunkFile)
 
       // Store as last recording for retrieval
@@ -646,7 +643,6 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
       )
       currentChunkId = null
       
-      // Build audio file info if available
       val audioFileInfo = audioFile?.let { af ->
         if (af.exists()) {
           AudioRecordingFile(
@@ -687,27 +683,19 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
   override fun isScreenBeingRecorded(): Boolean {
     val service = globalRecordingService
     val hasSession = service?.hasActiveSession() == true
-    val isRecording = service?.isCurrentlyRecording() == true
-    val ctx = NitroModules.applicationContext
-    val serviceRunning = if (ctx != null) isServiceRunning(ctx) else false
-    
-    // Log for debugging
-    Log.d(TAG, "📊 isScreenBeingRecorded: hasSession=$hasSession, isRecording=$isRecording, serviceRunning=$serviceRunning, isBound=$isServiceBound")
-    
-    // Return true if we have an active MediaProjection session (even if paused between chunks)
+
     if (hasSession) {
       return true
     }
-    
-    // Fallback: check if the service is running even if we're not bound
-    if (ctx == null) return false
-    
-    // If service is running but we're not bound, try to rebind
+
+    val ctx = NitroModules.applicationContext ?: return false
+
+    val serviceRunning = isServiceRunning(ctx)
     if (serviceRunning && !isServiceBound) {
       Log.d(TAG, "📡 Service running but not bound, attempting rebind...")
       rebindToExistingService(ctx)
     }
-    
+
     return serviceRunning
   }
 

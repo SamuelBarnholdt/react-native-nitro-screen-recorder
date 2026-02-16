@@ -51,9 +51,9 @@ object RecorderUtils {
   }
 
   fun buildRecordingProfile(screenWidth: Int, screenHeight: Int): RecordingProfile {
-    val maxLongSide = if (isLikelyEmulator()) 1280 else 1920
-    val bitrate = if (isLikelyEmulator()) 3 * 1024 * 1024 else 4 * 1024 * 1024
-    val fps = if (isLikelyEmulator()) 24 else 24
+    val maxLongSide = 1920
+    val bitrate = 4 * 1024 * 1024
+    val fps = 24
 
     val isLandscape = screenWidth >= screenHeight
     val longSide = if (isLandscape) screenWidth else screenHeight
