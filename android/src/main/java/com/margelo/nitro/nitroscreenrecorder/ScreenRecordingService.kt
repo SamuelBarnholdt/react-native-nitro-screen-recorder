@@ -107,6 +107,10 @@ class ScreenRecordingService : Service() {
     const val EXTRA_RESULT_DATA = "RESULT_DATA"
     const val EXTRA_ENABLE_MIC = "ENABLE_MIC"
     const val EXTRA_SEPARATE_AUDIO = "SEPARATE_AUDIO"
+
+    @Volatile
+    var isSessionActive = false
+      private set
   }
 
   inner class LocalBinder : Binder() {
@@ -267,6 +271,7 @@ class ScreenRecordingService : Service() {
         getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
       mediaProjection =
         mediaProjectionManager.getMediaProjection(resultCode, resultData)
+      isSessionActive = true
 
       // Register the callback BEFORE creating VirtualDisplay
       mediaProjection?.registerCallback(mediaProjectionCallback, mainHandler)
@@ -354,23 +359,10 @@ class ScreenRecordingService : Service() {
     }
 
     var recordingFile: File? = null
-    var audioFile: File? = null
 
     try {
       mediaRecorder?.stop()
-      isRecording = false
-      recordingFile = currentRecordingFile
-
-      val event = ScreenRecordingEvent(
-        type = RecordingEventType.GLOBAL,
-        reason = RecordingEventReason.ENDED
-      )
-      recordingFile?.let {
-        NitroScreenRecorder.notifyGlobalRecordingFinished(it, null, event, enableMic)
-      }
-
       Log.d(TAG, "🎉 Global screen recording stopped successfully")
-
     } catch (e: Exception) {
       Log.e(TAG, "❌ Error stopping global recording: ${e.message}")
       e.printStackTrace()
@@ -380,6 +372,19 @@ class ScreenRecordingService : Service() {
       )
       NitroScreenRecorder.notifyGlobalRecordingError(error)
     } finally {
+      isRecording = false
+      recordingFile = currentRecordingFile
+
+      val event = ScreenRecordingEvent(
+        type = RecordingEventType.GLOBAL,
+        reason = RecordingEventReason.ENDED
+      )
+      if (recordingFile != null) {
+        NitroScreenRecorder.notifyGlobalRecordingFinished(recordingFile, null, event, enableMic)
+      } else {
+        NitroScreenRecorder.notifyGlobalRecordingEvent(event)
+      }
+
       cleanup()
       stopForeground(true)
       stopSelf(this.startId)
@@ -567,47 +572,62 @@ class ScreenRecordingService : Service() {
   private fun cleanup() {
     Log.d(TAG, "🧹 cleanup() called")
 
+    isSessionActive = false
+    isRecording = false
+    isCapturing = false
+    chunkStartedAt = 0.0
+    recordingStartedAt = 0.0
+    currentAudioFile = null
+    separateAudioFile = false
+    captureMode = CaptureMode.UNKNOWN
+    isSingleAppMode = false
+
     try {
       virtualDisplay?.release()
-      virtualDisplay = null
-      mediaRecorder?.release()
-      mediaRecorder = null
-      
-      // Reset audio file state
-      currentAudioFile = null
-      separateAudioFile = false
-      
-      // Reset chunking state
-      isCapturing = false
-      chunkStartedAt = 0.0
-      recordingStartedAt = 0.0
-      
-      // Reset capture mode
-      captureMode = CaptureMode.UNKNOWN
-      isSingleAppMode = false
+    } catch (e: Exception) {
+      Log.e(TAG, "❌ Error releasing VirtualDisplay: ${e.message}")
+    }
+    virtualDisplay = null
 
-      // Unregister callback before stopping MediaProjection
+    try {
+      mediaRecorder?.release()
+    } catch (e: Exception) {
+      Log.e(TAG, "❌ Error releasing MediaRecorder: ${e.message}")
+    }
+    mediaRecorder = null
+
+    try {
       mediaProjection?.unregisterCallback(mediaProjectionCallback)
       mediaProjection?.stop()
-      mediaProjection = null
-
-      Log.d(TAG, "✅ Cleanup completed")
     } catch (e: Exception) {
-      Log.e(TAG, "❌ Error during cleanup: ${e.message}")
+      Log.e(TAG, "❌ Error stopping MediaProjection: ${e.message}")
     }
+    mediaProjection = null
+
+    Log.d(TAG, "✅ Cleanup completed")
   }
 
   fun isCurrentlyRecording(): Boolean = isRecording
 
   override fun onDestroy() {
     Log.d(TAG, "💀 onDestroy called")
+    val hadActiveSession = mediaProjection != null
     cleanup()
+    if (hadActiveSession) {
+      Log.d(TAG, "💀 Service destroyed with active session, firing ENDED event")
+      val event = ScreenRecordingEvent(
+        type = RecordingEventType.GLOBAL,
+        reason = RecordingEventReason.ENDED
+      )
+      NitroScreenRecorder.notifyGlobalRecordingEvent(event)
+    }
     super.onDestroy()
   }
   
   override fun onTaskRemoved(rootIntent: Intent?) {
     Log.d(TAG, "🚨 onTaskRemoved called - app swiped away from recents")
     // Don't cleanup here - keep recording even if app is swiped away
+    // Global recording needs to capture content outside the app
     super.onTaskRemoved(rootIntent)
   }
   

@@ -94,6 +94,9 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
         recorder.lastGlobalRecording = file
         recorder.lastGlobalAudioRecording = audioFile
         recorder.lastGlobalRecordingEnabledMicrophone = enabledMic
+        if (event.type == RecordingEventType.GLOBAL && event.reason == RecordingEventReason.ENDED) {
+          recorder.globalRecordingInitiatedByThisPackage = false
+        }
         recorder.notifyListeners(event)
       }
     }
@@ -114,9 +117,9 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
         ctx.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
       instance = this
       
-      // Try to rebind to existing service if it's running (handles hot reload case)
-      if (isServiceRunning(ctx)) {
-        Log.d(TAG, "🔄 Service is running, attempting to rebind...")
+      // Try to rebind to existing service if it has an active session (handles hot reload case)
+      if (ScreenRecordingService.isSessionActive) {
+        Log.d(TAG, "🔄 Service has active session, attempting to rebind...")
         rebindToExistingService(ctx)
       }
       
@@ -124,21 +127,6 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
     } ?: run {
       Log.e(TAG, "❌ NitroScreenRecorder: applicationContext was null")
     }
-  }
-  
-  /**
-   * Check if the ScreenRecordingService is currently running.
-   * This works even if we're not bound to the service.
-   */
-  @Suppress("DEPRECATION")
-  private fun isServiceRunning(context: Context): Boolean {
-    val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-    for (service in manager.getRunningServices(Int.MAX_VALUE)) {
-      if (ScreenRecordingService::class.java.name == service.service.className) {
-        return true
-      }
-    }
-    return false
   }
   
   /**
@@ -424,21 +412,18 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
         throw Error("NO_CONTEXT")
       }
 
-      // Check if we have an active session (MediaProjection exists)
       val service = globalRecordingService
       val hasActiveSession = service?.hasActiveSession() == true
       val enabledMic = service?.isMicrophoneEnabled() == true
       val separateAudio = service?.isSeparateAudioEnabled() == true
-      val serviceRunning = isServiceRunning(ctx)
+      val sessionActive = ScreenRecordingService.isSessionActive
 
-      if (!hasActiveSession && !serviceRunning) {
+      if (!hasActiveSession && !sessionActive) {
         throw Error("NO_ACTIVE_RECORDING_SESSION")
       }
 
-      // If service is running but we're not bound, we still send the stop intent
-      // This handles hot reload scenarios where the service is orphaned
-      if (serviceRunning) {
-        Log.d(TAG, "🛑 Stopping recording service (bound: $isServiceBound, hasSession: $hasActiveSession)")
+      if (hasActiveSession || sessionActive) {
+        Log.d(TAG, "🛑 Stopping recording service (bound: $isServiceBound, hasSession: $hasActiveSession, sessionActive: $sessionActive)")
 
         val stopIntent = Intent(ctx, ScreenRecordingService::class.java).apply {
           action = ScreenRecordingService.ACTION_STOP_RECORDING
@@ -682,21 +667,18 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
 
   override fun isScreenBeingRecorded(): Boolean {
     val service = globalRecordingService
-    val hasSession = service?.hasActiveSession() == true
-
-    if (hasSession) {
+    if (service?.hasActiveSession() == true) {
       return true
     }
 
-    val ctx = NitroModules.applicationContext ?: return false
-
-    val serviceRunning = isServiceRunning(ctx)
-    if (serviceRunning && !isServiceBound) {
-      Log.d(TAG, "📡 Service running but not bound, attempting rebind...")
+    val sessionActive = ScreenRecordingService.isSessionActive
+    if (sessionActive && !isServiceBound) {
+      val ctx = NitroModules.applicationContext ?: return sessionActive
+      Log.d(TAG, "📡 Session active but not bound, attempting rebind...")
       rebindToExistingService(ctx)
     }
 
-    return serviceRunning
+    return sessionActive
   }
 
   override fun getExtensionLogs(): Array<String> {
