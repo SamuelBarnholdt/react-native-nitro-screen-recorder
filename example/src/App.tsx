@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import * as ScreenRecorder from '../../';
 import { useVideoPlayer, VideoView } from 'expo-video';
+import { Audio } from 'expo-av';
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 
@@ -135,6 +136,197 @@ type Chunk = {
   file: ScreenRecorder.ScreenRecordingFile;
   timestamp: Date;
 };
+
+function AudioFilePlayer({
+  audioFile,
+  label,
+}: {
+  audioFile: ScreenRecorder.AudioRecordingFile;
+  label: string;
+}) {
+  const [sound, setSound] = useState<Audio.Sound | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [position, setPosition] = useState(0);
+
+  useEffect(() => {
+    return () => {
+      sound?.unloadAsync();
+    };
+  }, [sound]);
+
+  const handlePlayPause = async () => {
+    if (isPlaying && sound) {
+      await sound.pauseAsync();
+      setIsPlaying(false);
+      return;
+    }
+
+    if (sound) {
+      await sound.playAsync();
+      setIsPlaying(true);
+      return;
+    }
+
+    const { sound: newSound } = await Audio.Sound.createAsync(
+      { uri: audioFile.path },
+      { shouldPlay: true }
+    );
+    newSound.setOnPlaybackStatusUpdate((status) => {
+      if (!status.isLoaded) return;
+      setPosition(status.positionMillis / 1000);
+      if (status.didJustFinish) {
+        setIsPlaying(false);
+        setPosition(0);
+        newSound.setPositionAsync(0);
+      }
+    });
+    setSound(newSound);
+    setIsPlaying(true);
+  };
+
+  const handleStop = async () => {
+    if (sound) {
+      await sound.stopAsync();
+      await sound.setPositionAsync(0);
+      setIsPlaying(false);
+      setPosition(0);
+    }
+  };
+
+  const formatBytes = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  };
+
+  return (
+    <View style={audioPlayerStyles.container}>
+      <View style={audioPlayerStyles.header}>
+        <Text style={audioPlayerStyles.label}>{label}</Text>
+        <Text style={audioPlayerStyles.meta}>
+          {audioFile.duration.toFixed(1)}s • {formatBytes(audioFile.size)}
+        </Text>
+      </View>
+      <View style={audioPlayerStyles.controls}>
+        <TouchableOpacity
+          style={audioPlayerStyles.playButton}
+          onPress={handlePlayPause}
+        >
+          <Text style={audioPlayerStyles.playButtonText}>
+            {isPlaying ? '⏸' : '▶️'}
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={audioPlayerStyles.stopButton}
+          onPress={handleStop}
+          disabled={!sound}
+        >
+          <Text
+            style={[
+              audioPlayerStyles.stopButtonText,
+              !sound && { opacity: 0.3 },
+            ]}
+          >
+            ⏹
+          </Text>
+        </TouchableOpacity>
+        <View style={audioPlayerStyles.progressContainer}>
+          <View
+            style={[
+              audioPlayerStyles.progressBar,
+              {
+                width:
+                  audioFile.duration > 0
+                    ? `${(position / audioFile.duration) * 100}%`
+                    : '0%',
+              },
+            ]}
+          />
+        </View>
+        <Text style={audioPlayerStyles.time}>
+          {position.toFixed(1)}s / {audioFile.duration.toFixed(1)}s
+        </Text>
+      </View>
+      <Text style={audioPlayerStyles.filename}>{audioFile.name}</Text>
+    </View>
+  );
+}
+
+const audioPlayerStyles = StyleSheet.create({
+  container: {
+    marginTop: 8,
+    backgroundColor: '#1C2A1C',
+    borderRadius: 8,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#2D4A2D',
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  label: {
+    color: '#4ADE80',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  meta: {
+    color: '#6B8E6B',
+    fontSize: 11,
+  },
+  controls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  playButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#2D4A2D',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playButtonText: {
+    fontSize: 16,
+  },
+  stopButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#2D4A2D',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stopButtonText: {
+    fontSize: 16,
+  },
+  progressContainer: {
+    flex: 1,
+    height: 4,
+    backgroundColor: '#2D4A2D',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  progressBar: {
+    height: '100%',
+    backgroundColor: '#4ADE80',
+    borderRadius: 2,
+  },
+  time: {
+    color: '#6B8E6B',
+    fontSize: 10,
+    minWidth: 70,
+    textAlign: 'right',
+  },
+  filename: {
+    color: '#4A6B4A',
+    fontSize: 10,
+    marginTop: 6,
+  },
+});
 
 export default function App() {
   // Dev-only: cleanup stale sessions after hot reload (Android)
@@ -2357,6 +2549,7 @@ export default function App() {
                     <Text style={styles.chunkMeta}>
                       {formatDuration(chunk.file.duration)} •{' '}
                       {formatSize(chunk.file.size)}
+                      {chunk.file.audioFile ? ' • has audio' : ''}
                     </Text>
                   </View>
                   <Text style={styles.chunkTime}>
@@ -2378,6 +2571,20 @@ export default function App() {
                 style={styles.player}
                 contentFit="contain"
               />
+              {selectedChunk.file.audioFile && (
+                <AudioFilePlayer
+                  key={`chunk-mic-${selectedChunk.id}`}
+                  audioFile={selectedChunk.file.audioFile}
+                  label="Mic Audio"
+                />
+              )}
+              {selectedChunk.file.appAudioFile && (
+                <AudioFilePlayer
+                  key={`chunk-app-${selectedChunk.id}`}
+                  audioFile={selectedChunk.file.appAudioFile}
+                  label="App Audio"
+                />
+              )}
             </View>
           )}
 
@@ -2816,6 +3023,18 @@ export default function App() {
                   style={styles.player}
                   contentFit="contain"
                 />
+                {inAppRecording.audioFile && (
+                  <AudioFilePlayer
+                    audioFile={inAppRecording.audioFile}
+                    label="Mic Audio"
+                  />
+                )}
+                {inAppRecording.appAudioFile && (
+                  <AudioFilePlayer
+                    audioFile={inAppRecording.appAudioFile}
+                    label="App Audio"
+                  />
+                )}
               </View>
             )}
           </View>
@@ -2835,6 +3054,18 @@ export default function App() {
               style={styles.player}
               contentFit="contain"
             />
+            {globalRecording.audioFile && (
+              <AudioFilePlayer
+                audioFile={globalRecording.audioFile}
+                label="Mic Audio"
+              />
+            )}
+            {globalRecording.appAudioFile && (
+              <AudioFilePlayer
+                audioFile={globalRecording.appAudioFile}
+                label="App Audio"
+              />
+            )}
           </View>
         )}
 
