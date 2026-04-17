@@ -191,15 +191,35 @@ public final class BroadcastWriter {
   private let appAudioOutputURL: URL?
   private var appAudioAssetWriterSessionStarted: Bool = false
 
+  // Encoding targets — kept in sync with Android's `RecorderUtils.buildRecordingProfile`.
+  // HEVC is ~40% more efficient than H.264 at equivalent perceptual quality, so we use
+  // a lower bitrate when HEVC is available.
+  private static let maxLongSidePixels: Int = 1920
+  private static let videoBitrateHEVC: Int = 1_500_000
+  private static let videoBitrateH264: Int = 2_500_000
+  private static let videoExpectedFrameRate: Int = 24
+
   private lazy var videoInput: AVAssetWriterInput = { [unowned self] in
-    let videoWidth = screenSize.width * screenScale
-    let videoHeight = screenSize.height * screenScale
+    let nativeWidth = Int(screenSize.width * screenScale)
+    let nativeHeight = Int(screenSize.height * screenScale)
 
-    // Ensure encoder-friendly even dimensions
-    let w = (Int(videoWidth) / 2) * 2
-    let h = (Int(videoHeight) / 2) * 2
+    // Cap the long side at maxLongSidePixels while preserving aspect ratio.
+    // Screen recording at full 3x retina (e.g. 1179x2556) is overkill and dominates file size.
+    let isLandscape = nativeWidth >= nativeHeight
+    let longSide = isLandscape ? nativeWidth : nativeHeight
+    let shortSide = isLandscape ? nativeHeight : nativeWidth
+    let scale = min(1.0, Double(Self.maxLongSidePixels) / Double(longSide))
 
-    // Decide codec: prefer HEVC when available
+    var scaledLong = Int(Double(longSide) * scale)
+    var scaledShort = Int(Double(shortSide) * scale)
+
+    // Encoder-friendly even dimensions
+    if scaledLong % 2 != 0 { scaledLong -= 1 }
+    if scaledShort % 2 != 0 { scaledShort -= 1 }
+
+    let w = isLandscape ? scaledLong : scaledShort
+    let h = isLandscape ? scaledShort : scaledLong
+
     let hevcSupported: Bool = {
       if #available(iOS 11.0, *) {
         return self.assetWriter.canApply(
@@ -211,12 +231,13 @@ public final class BroadcastWriter {
     }()
 
     let codec: AVVideoCodecType = hevcSupported ? .hevc : .h264
+    let bitrate = hevcSupported ? Self.videoBitrateHEVC : Self.videoBitrateH264
 
     var compressionProperties: [String: Any] = [
-      AVVideoExpectedSourceFrameRateKey: 30.nsNumber
+      AVVideoExpectedSourceFrameRateKey: Self.videoExpectedFrameRate.nsNumber,
+      AVVideoAverageBitRateKey: bitrate.nsNumber,
     ]
     if hevcSupported {
-      // Works broadly; adjust if you need different profiles
       compressionProperties[AVVideoProfileLevelKey] = "HEVC_Main_AutoLevel"
     } else {
       compressionProperties[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
@@ -228,6 +249,10 @@ public final class BroadcastWriter {
       AVVideoHeightKey: h.nsNumber,
       AVVideoCompressionPropertiesKey: compressionProperties,
     ]
+
+    debugPrint(
+      "🎥 Video encoder: codec=\(codec.rawValue), \(w)x\(h) (native \(nativeWidth)x\(nativeHeight)), bitrate=\(bitrate / 1000)kbps, fps=\(Self.videoExpectedFrameRate)"
+    )
 
     let input = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
     input.expectsMediaDataInRealTime = true

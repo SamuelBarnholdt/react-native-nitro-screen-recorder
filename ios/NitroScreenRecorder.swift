@@ -341,24 +341,29 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
     // Remove any existing file
     try? FileManager.default.removeItem(at: audioURL)
 
-    let audioSettings: [String: Any] = [
-      AVFormatIDKey: kAudioFormatMPEG4AAC,
-      AVSampleRateKey: 44100.0,
-      AVNumberOfChannelsKey: 1,
-      AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-      AVEncoderBitRateKey: 128000,
-    ]
-
     do {
-      // Configure audio session
+      // Configure audio session BEFORE reading sampleRate
       let audioSession = AVAudioSession.sharedInstance()
       try audioSession.setCategory(
-        .playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
+        .playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+      try audioSession.setPreferredSampleRate(48_000)
       try audioSession.setActive(true)
+
+      // Use the device's actual sample rate (48kHz on iOS 18+ iPhones)
+      let sampleRate = audioSession.sampleRate > 0 ? audioSession.sampleRate : 48_000
+      let bitRate = sampleRate >= 48_000 ? 128_000 : 64_000
+
+      let audioSettings: [String: Any] = [
+        AVFormatIDKey: kAudioFormatMPEG4AAC,
+        AVSampleRateKey: sampleRate,
+        AVNumberOfChannelsKey: 1,
+        AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+        AVEncoderBitRateKey: bitRate,
+      ]
 
       audioRecorder = try AVAudioRecorder(url: audioURL, settings: audioSettings)
       audioRecorder?.record()
-      print("✅ Separate audio recording started: \(audioURL.path)")
+      print("✅ Separate audio recording started at \(sampleRate)Hz: \(audioURL.path)")
     } catch {
       print("❌ Failed to start separate audio recording: \(error.localizedDescription)")
       audioRecorder = nil
