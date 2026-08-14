@@ -1023,6 +1023,73 @@ export default function App() {
     }
   }, [isRecording]);
 
+  const stressTestTenMinuteRecording = useCallback(async () => {
+    if (!isRecording) {
+      Alert.alert('Not Recording', 'Start a global recording first');
+      return;
+    }
+    setIsStressTesting(true);
+    console.log('🧪 Stress Test: 10 Minute Recording');
+    console.log(
+      '   ⚠️ Keep the app foregrounded (JS timers pause in background)'
+    );
+
+    const markMs = await ScreenRecorder.markChunkStart('ten-minute');
+    console.log(`   Chunk marked in ${markMs.toFixed(0)}ms, recording...`);
+
+    const totalMinutes = 10;
+    for (let minute = 1; minute <= totalMinutes; minute++) {
+      await new Promise((r) => setTimeout(r, 60_000));
+      console.log(`   ⏱ ${minute}/${totalMinutes} minutes elapsed`);
+    }
+
+    console.log('   Finalizing...');
+    const t0 = performance.now();
+    const file = await ScreenRecorder.finalizeChunk('ten-minute', {
+      settledTimeMs: 500,
+    });
+    const elapsed = (performance.now() - t0).toFixed(0);
+
+    setIsStressTesting(false);
+
+    if (file) {
+      const sizeMb = (file.size / 1024 / 1024).toFixed(1);
+      const expectedSeconds = totalMinutes * 60;
+      const durationOk = Math.abs(file.duration - expectedSeconds) < 10;
+      const audioOk = !file.audioFile
+        ? true
+        : Math.abs(file.audioFile.duration - file.duration) < 2;
+      console.log(
+        `   ${durationOk ? '✅' : '❌'} Video duration: ${file.duration.toFixed(1)}s (expected ~${expectedSeconds}s)`
+      );
+      if (file.audioFile) {
+        console.log(
+          `   ${audioOk ? '✅' : '❌'} Audio duration: ${file.audioFile.duration.toFixed(1)}s`
+        );
+      }
+      console.log(`   Size: ${sizeMb} MB, finalized in ${elapsed}ms`);
+      Alert.alert(
+        '10 Minute Recording',
+        `${durationOk && audioOk ? '✅' : '❌'} Video: ${file.duration.toFixed(1)}s, ${sizeMb} MB` +
+          (file.audioFile
+            ? `\n🎵 Audio: ${file.audioFile.duration.toFixed(1)}s`
+            : '') +
+          `\nFinalized in ${elapsed}ms`
+      );
+    } else {
+      console.log(`   ❌ No file returned after ${elapsed}ms`);
+      if (Platform.OS === 'ios') {
+        console.log('   📜 Extension logs after 10 Minute failure:');
+        const logs = ScreenRecorder.getExtensionLogs();
+        logs.slice(-20).forEach((log) => console.log(`      ${log}`));
+      }
+      Alert.alert(
+        '10 Minute Recording',
+        `❌ No file returned after ${elapsed}ms`
+      );
+    }
+  }, [isRecording]);
+
   const stressTestRaceCondition = useCallback(async () => {
     if (!isRecording) {
       Alert.alert('Not Recording', 'Start a global recording first');
@@ -2463,6 +2530,20 @@ export default function App() {
                 {isStressTesting ? '⏳' : '🎬'} Long Recording
               </Text>
               <Text style={styles.stressTestSubtext}>10 second chunk</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.stressTestButton,
+                (!isRecording || isStressTesting) && styles.disabledButton,
+              ]}
+              onPress={stressTestTenMinuteRecording}
+              disabled={!isRecording || isStressTesting}
+            >
+              <Text style={styles.stressTestButtonText}>
+                {isStressTesting ? '⏳' : '🕙'} 10 Min Recording
+              </Text>
+              <Text style={styles.stressTestSubtext}>Full-length chunk</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
