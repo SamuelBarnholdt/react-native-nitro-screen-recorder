@@ -165,7 +165,14 @@ export const useGlobalRecording = (
           // We add a small delay after the recording ends to allow the file to finish writing
           // to disk before trying to fetch it
           await delay(props?.settledTimeMs ?? 500);
-          const file = retrieveLastGlobalRecording();
+          // Finalizing scales with recording length, so keep retrying until
+          // the file lands rather than giving up after a single attempt
+          let file = retrieveLastGlobalRecording();
+          const deadline = Date.now() + 15_000;
+          while (!file && Date.now() < deadline) {
+            await delay(500);
+            file = retrieveLastGlobalRecording();
+          }
           props?.onRecordingFinished?.(file);
         }
       },

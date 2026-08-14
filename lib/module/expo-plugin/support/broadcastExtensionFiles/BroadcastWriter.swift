@@ -353,7 +353,16 @@ public final class BroadcastWriter {
   ) throws {
     assetWriterQueue = queue
     assetWriter = try .init(url: url, fileType: .mp4)
-    assetWriter.shouldOptimizeForNetworkUse = true
+    // Write movie fragments every 2s so:
+    // 1. The file stays playable up to the last fragment if the extension is
+    //    killed mid-recording (memory limit) or mid-finish (watchdog).
+    // 2. finishWriting() stays near-instant regardless of recording length,
+    //    instead of scaling with duration (long recordings were exceeding the
+    //    fixed retrieval timeouts in the main app and the system's grace
+    //    period for broadcastFinished).
+    // Fragmented output has no trailing moov, so shouldOptimizeForNetworkUse
+    // does not apply to this writer.
+    assetWriter.movieFragmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
 
     self.screenSize = screenSize
     self.screenScale = screenScale
