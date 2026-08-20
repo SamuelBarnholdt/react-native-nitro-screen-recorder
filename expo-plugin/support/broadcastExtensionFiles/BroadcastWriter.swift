@@ -198,6 +198,8 @@ public final class BroadcastWriter {
   private static let videoBitrateHEVC: Int = 1_500_000
   private static let videoBitrateH264: Int = 2_500_000
   private static let videoExpectedFrameRate: Int = 24
+  private let minimumVideoFrameInterval = CMTime(value: 1, timescale: 24)
+  private var nextVideoFramePTS: CMTime?
 
   private lazy var videoInput: AVAssetWriterInput = { [unowned self] in
     let nativeWidth = Int(screenSize.width * screenScale)
@@ -752,15 +754,15 @@ public final class BroadcastWriter {
 
   /// Returns true if the writer has received at least one video frame
   public var hasReceivedVideoFrames: Bool {
-    return assetWriterQueue.sync { assetWriterSessionStarted }
+    return assetWriterQueue.sync { totalVideoFrames > 0 }
   }
 
   public func finishWithAudio() throws -> FinishResult {
     return try assetWriterQueue.sync {
-      // IMPORTANT: If no video frames were ever received, the session was never started.
-      // AVAssetWriter will fail if we try to finish without starting a session.
-      // In this case, cancel the writer and throw a specific error.
-      guard assetWriterSessionStarted else {
+      // A session can start before the first frame append succeeds. Require an
+      // actual encoded video frame so an audio-only writer is not treated as a
+      // valid screen recording.
+      guard assetWriterSessionStarted, totalVideoFrames > 0 else {
         debugPrint("⚠️ BroadcastWriter: No video frames received, canceling writer")
         assetWriter.cancelWriting()
         // Also cancel audio writers
@@ -1045,19 +1047,28 @@ extension BroadcastWriter {
   }
 
   fileprivate func captureVideoOutput(_ sampleBuffer: CMSampleBuffer) -> Bool {
+    let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+    // ExpectedSourceFrameRate only informs the encoder; ReplayKit can still
+    // deliver at the display refresh rate. Thin the samples before encoding so
+    // the extension actually does no more than 24 fps of video encoding work.
+    if let nextPTS = nextVideoFramePTS, CMTimeCompare(pts, nextPTS) < 0 {
+      return true
+    }
+
     if !videoInput.isReadyForMoreMediaData {
       videoBackpressureHits += 1
-      // Brief wait for video - critical for sync
-      if !waitForInputReady(videoInput, timeout: 0.05) {
+
+      // ReplayKit delivers video and audio callbacks serially. Once the video
+      // track is established, waiting here prevents the next microphone buffer
+      // from arriving. Prefer a visual gap over starving transcription audio.
+      let didBecomeReady =
+        totalVideoFrames == 0 && waitForInputReady(videoInput, timeout: 0.05)
+      if !didBecomeReady {
         videoBackpressureDrops += 1
-        debugPrint(
-          "⚠️ videoInput backpressure drop (hits: \(videoBackpressureHits), drops: \(videoBackpressureDrops))"
-        )
         return false
       }
     }
-    let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-
     // Track first video PTS for sync analysis
     if firstVideoPTS == nil {
       firstVideoPTS = pts
@@ -1085,6 +1096,14 @@ extension BroadcastWriter {
         lastVideoFrameDuration = frameDuration
       }
       lastVideoPTS = pts
+      if var nextPTS = nextVideoFramePTS {
+        repeat {
+          nextPTS = CMTimeAdd(nextPTS, minimumVideoFrameInterval)
+        } while CMTimeCompare(nextPTS, pts) <= 0
+        nextVideoFramePTS = nextPTS
+      } else {
+        nextVideoFramePTS = CMTimeAdd(pts, minimumVideoFrameInterval)
+      }
       if CMTimeCompare(endTime, lastVideoEndTime) > 0 {
         lastVideoEndTime = endTime
       }
