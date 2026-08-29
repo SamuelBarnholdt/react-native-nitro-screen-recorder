@@ -459,6 +459,17 @@ class NitroScreenRecorder : HybridNitroScreenRecorderSpec() {
 
       delay(settledTimeMs.toLong())
 
+      // MediaRecorder.stop() finalizes the file on the main thread and its
+      // duration scales with recording length, so poll for the finished file
+      // instead of checking once after a fixed delay.
+      val deadline = System.currentTimeMillis() + 15_000
+      while (
+        (lastGlobalRecording == null || lastGlobalRecording?.exists() != true) &&
+        System.currentTimeMillis() < deadline
+      ) {
+        delay(250)
+      }
+
       // Post-process the raw recording file (optimize + extract audio)
       val rawFile = lastGlobalRecording
       if (rawFile != null && rawFile.exists()) {

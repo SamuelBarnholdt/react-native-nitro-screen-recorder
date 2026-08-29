@@ -191,13 +191,26 @@ public final class BroadcastWriter {
   private let appAudioOutputURL: URL?
   private var appAudioAssetWriterSessionStarted: Bool = false
 
+  // Output caps, aligned with the Android recording profile (1920 long side).
+  // Without these, the encoder records at native device resolution with a
+  // resolution-scaled default bitrate, so file size and extension memory vary
+  // wildly by device. Screen content (mostly static UI) compresses well, and
+  // HEVC needs less bitrate than H.264 for the same quality.
+  private static let maxOutputLongSide: CGFloat = 1920
+  private static let hevcBitRate = 5_000_000
+  private static let h264BitRate = 8_000_000
+
   private lazy var videoInput: AVAssetWriterInput = { [unowned self] in
     let videoWidth = screenSize.width * screenScale
     let videoHeight = screenSize.height * screenScale
 
+    // Downscale to the long-side cap, preserving aspect ratio
+    let longSide = max(videoWidth, videoHeight)
+    let downscale = longSide > Self.maxOutputLongSide ? Self.maxOutputLongSide / longSide : 1.0
+
     // Ensure encoder-friendly even dimensions
-    let w = (Int(videoWidth) / 2) * 2
-    let h = (Int(videoHeight) / 2) * 2
+    let w = (Int(videoWidth * downscale) / 2) * 2
+    let h = (Int(videoHeight * downscale) / 2) * 2
 
     // Decide codec: prefer HEVC when available
     let hevcSupported: Bool = {
@@ -213,7 +226,8 @@ public final class BroadcastWriter {
     let codec: AVVideoCodecType = hevcSupported ? .hevc : .h264
 
     var compressionProperties: [String: Any] = [
-      AVVideoExpectedSourceFrameRateKey: 30.nsNumber
+      AVVideoExpectedSourceFrameRateKey: 30.nsNumber,
+      AVVideoAverageBitRateKey: (hevcSupported ? Self.hevcBitRate : Self.h264BitRate).nsNumber,
     ]
     if hevcSupported {
       // Works broadly; adjust if you need different profiles
@@ -339,7 +353,16 @@ public final class BroadcastWriter {
   ) throws {
     assetWriterQueue = queue
     assetWriter = try .init(url: url, fileType: .mp4)
-    assetWriter.shouldOptimizeForNetworkUse = true
+    // Write movie fragments every 2s so:
+    // 1. The file stays playable up to the last fragment if the extension is
+    //    killed mid-recording (memory limit) or mid-finish (watchdog).
+    // 2. finishWriting() stays near-instant regardless of recording length,
+    //    instead of scaling with duration (long recordings were exceeding the
+    //    fixed retrieval timeouts in the main app and the system's grace
+    //    period for broadcastFinished).
+    // Fragmented output has no trailing moov, so shouldOptimizeForNetworkUse
+    // does not apply to this writer.
+    assetWriter.movieFragmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
 
     self.screenSize = screenSize
     self.screenScale = screenScale

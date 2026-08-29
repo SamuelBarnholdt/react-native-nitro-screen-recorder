@@ -645,11 +645,23 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
       let settleTimeNanoseconds = UInt64(settledTimeMs * 1_000_000)  // Convert ms to nanoseconds
       try? await Task.sleep(nanoseconds: settleTimeNanoseconds)
 
-      do {
-        return try self.retrieveLastGlobalRecording()
-      } catch {
-        print("❌ retrieveLastGlobalRecording failed after stop:", error)
-        return nil
+      // The extension finishes writing asynchronously and the finish time scales
+      // with recording length, so poll until the file lands instead of checking once.
+      let deadline = Date().addingTimeInterval(20)
+      while true {
+        do {
+          if let file = try self.retrieveLastGlobalRecording() {
+            return file
+          }
+        } catch {
+          print("❌ retrieveLastGlobalRecording failed after stop:", error)
+          return nil
+        }
+        guard Date() < deadline else {
+          print("❌ stopGlobalRecording: no file appeared within 20s of stopping")
+          return nil
+        }
+        try? await Task.sleep(nanoseconds: 250_000_000)  // 250ms between polls
       }
     }
   }
@@ -830,16 +842,20 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
         nil
       )
 
-      // Try to retrieve with aggressive polling if first attempt fails
+      // Try to retrieve with polling if first attempt fails. The extension's
+      // finish/save time scales with chunk length, so the ceiling must be
+      // generous (each poll is just a UserDefaults read, so this is cheap).
       do {
         if let file = try self.retrieveGlobalRecording(chunkId: chunkIdToRetrieve) {
           return file
         }
 
-        // Poll up to 15 times, 200ms apart (~3 second total extra wait)
-        for attempt in 1...15 {
-          print("⚠️ Retrieval returned nil, polling attempt \(attempt)/15...")
-          try? await Task.sleep(nanoseconds: 200_000_000)  // 200ms
+        let deadline = Date().addingTimeInterval(15)
+        var attempt = 0
+        while Date() < deadline {
+          attempt += 1
+          print("⚠️ Retrieval returned nil, polling attempt \(attempt)...")
+          try? await Task.sleep(nanoseconds: 250_000_000)  // 250ms
 
           if let file = try self.retrieveGlobalRecording(chunkId: chunkIdToRetrieve) {
             print("✅ Polling attempt \(attempt) succeeded")
@@ -847,7 +863,7 @@ class NitroScreenRecorder: HybridNitroScreenRecorderSpec {
           }
         }
 
-        print("❌ All polling attempts returned nil")
+        print("❌ finalizeChunk: no chunk appeared within 15s")
         return nil
       } catch {
         print("❌ retrieveGlobalRecording failed after finalizeChunk:", error)
